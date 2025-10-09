@@ -1,0 +1,23 @@
+{
+  "biblio": {
+    "games": [
+      {
+        "title": "Starfield",
+        "editor": "Bethesda Game Studios",
+        "release": 2023
+      },
+      {
+        "title": "Super Mario Bros. Wonder",
+        "editor": "Nintendo",
+        "country": "JP",
+        "release": 2023
+      },
+      {
+        "title": "Doom",
+        "editor": "id Software",
+        "country": "US",
+        "release": 1993
+      }
+    ]
+  }
+}
