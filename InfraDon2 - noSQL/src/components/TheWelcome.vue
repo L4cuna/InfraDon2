@@ -9,10 +9,14 @@
 //const openReadmeInEditor = () => fetch('/__open-in-editor?file=README.md')
 
 import { ref } from 'vue'
+import PouchDB from 'pouchdb'
 //DATA VARIABLES
 const counter = ref(110);
 
 //FUNCTIONS METHODES CONSTRUCTEURS
+function mounted() {
+    this.initDatabase()
+}
 
 const increment = () => {
   counter.value++
