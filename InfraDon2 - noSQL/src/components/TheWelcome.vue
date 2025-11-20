@@ -33,8 +33,9 @@ interface NewPost {
 const localDB = ref<PouchDB.Database>();
 const remoteDB = ref<PouchDB.Database>();
 const postsData = ref<Post[]>([]);
+const syncHandler = ref<any>(null);
 
-// === Données réactives pour les formulaires ===
+// === Données réactives ===
 const newPost = ref<NewPost>({
   name: '',
   capital: '',
@@ -49,31 +50,54 @@ const newPost = ref<NewPost>({
 
 const editingPost = ref<Post | null>(null);
 const searchRegion = ref<string>('');
+const isOnline = ref<boolean>(true);
 
-// === Initialisation des bases locale et distante ===
+// === 1. Create/Connect Database (https://pouchdb.com/api.html#create_database) ===
 const initDatabases = () => {
+  // Base locale
   localDB.value = new PouchDB('local_biblio_db');
+  // Base distante
   remoteDB.value = new PouchDB('http://admin:admin@localhost:5984/firstdbinfradon2');
-  console.log('Bases locale et distante initialisées');
+  console.log('Bases de données créées/connectées');
 };
 
-// === Synchronisation des bases ===
+// === 2. Replicate Databases (https://pouchdb.com/api.html#replication) ===
 const syncDatabases = () => {
-  if (!localDB.value || !remoteDB.value) return;
-  localDB.value.sync(remoteDB.value, {
+  if (!isOnline.value || !localDB.value || !remoteDB.value) return;
+
+  // Synchronisation bidirectionnelle et continue
+  syncHandler.value = localDB.value.sync(remoteDB.value, {
     live: true,
     retry: true,
   })
-  .on('change', () => {
-    console.log('Synchronisation en cours...');
+  .on('change', (info) => {
+    console.log('Changement synchronisé:', info);
     fetchData();
   })
+  .on('denied', (err) => {
+    console.error('Conflit de synchronisation:', err);
+    alert('Conflit détecté. Vérifie les données dans CouchDB et l\'application.');
+  })
   .on('error', (err) => {
-    console.error('Erreur de synchronisation :', err);
+    console.error('Erreur de synchronisation:', err);
   });
 };
 
-// === Récupération des données locales ===
+// === 3. Toggle Online/Offline ===
+const toggleOnlineOffline = () => {
+  isOnline.value = !isOnline.value;
+  if (isOnline.value) {
+    console.log('Mode ONLINE - Synchronisation activée');
+    syncDatabases();
+  } else {
+    console.log('Mode OFFLINE - Synchronisation désactivée');
+    if (syncHandler.value) {
+      syncHandler.value.cancel();
+    }
+  }
+};
+
+// === 4. Retrieve All Documents (https://pouchdb.com/api.html#batch_fetch) ===
 const fetchData = async () => {
   if (!localDB.value) {
     console.warn('Base locale non initialisée');
@@ -82,14 +106,25 @@ const fetchData = async () => {
   try {
     const result = await localDB.value.allDocs({ include_docs: true });
     postsData.value = result.rows.map(row => row.doc);
-    console.log('Données locales mises à jour');
+    console.log('Données récupérées:', postsData.value.length, 'documents');
   } catch (error) {
-    console.error('Erreur lors de la récupération :', error);
+    console.error('Erreur lors de la récupération:', error);
   }
 };
 
-// === CRUD ===
-// Ajouter un document
+// === 5. Retrieve One Document (https://pouchdb.com/api.html#fetch_document) ===
+const getDocument = async (id: string) => {
+  if (!localDB.value) return null;
+  try {
+    const doc = await localDB.value.get(id);
+    return doc;
+  } catch (error) {
+    console.error('Erreur lors de la récupération du document:', error);
+    return null;
+  }
+};
+
+// === 6. Create/Update Document (https://pouchdb.com/api.html#create_document) ===
 const createPost = async (post: NewPost) => {
   if (!localDB.value) {
     console.warn('Base locale non initialisée');
@@ -101,49 +136,53 @@ const createPost = async (post: NewPost) => {
       languages: post.languages.split(',').map(lang => lang.trim()),
       _id: `country_${Date.now()}`,
     };
-    await localDB.value.post(doc);
+    const response = await localDB.value.post(doc);
+    console.log('Document créé:', response.id);
     await fetchData();
   } catch (error) {
-    console.error('Erreur lors de l\'ajout :', error);
+    console.error('Erreur lors de la création:', error);
   }
 };
 
-// Modifier un document
 const updatePost = async (post: Post) => {
   if (!localDB.value) {
     console.warn('Base locale non initialisée');
     return;
   }
   try {
-    const doc = await localDB.value.get(post._id);
+    const doc = await getDocument(post._id);
+    if (!doc) return;
     const updatedDoc = {
       ...doc,
       ...post,
       languages: post.languages.toString().split(',').map(lang => lang.trim()),
     };
-    await localDB.value.put(updatedDoc);
+    const response = await localDB.value.put(updatedDoc);
+    console.log('Document mis à jour:', response.id);
     await fetchData();
   } catch (error) {
-    console.error('Erreur lors de la mise à jour :', error);
+    console.error('Erreur lors de la mise à jour:', error);
   }
 };
 
-// Supprimer un document
+// === 7. Delete Document (https://pouchdb.com/api.html#delete_document) ===
 const deletePost = async (post: Post) => {
   if (!localDB.value) {
     console.warn('Base locale non initialisée');
     return;
   }
   try {
-    const doc = await localDB.value.get(post._id);
-    await localDB.value.remove(doc);
+    const doc = await getDocument(post._id);
+    if (!doc) return;
+    const response = await localDB.value.remove(doc);
+    console.log('Document supprimé:', response.id);
     await fetchData();
   } catch (error) {
-    console.error('Erreur lors de la suppression :', error);
+    console.error('Erreur lors de la suppression:', error);
   }
 };
 
-// === Factory pour générer des données ===
+// === 8. Factory pour générer des données ===
 const regions = ['Europe', 'Asia', 'Africa', 'Americas', 'Oceania'];
 const currencies = ['EUR', 'USD', 'JPY', 'GBP', 'AUD'];
 const languagesList = ['French', 'English', 'Spanish', 'German', 'Chinese'];
@@ -163,14 +202,13 @@ const generateRandomPost = (): NewPost => ({
 });
 
 const generateAndInsertData = async (count: number) => {
-  if (!localDB.value) return;
   for (let i = 0; i < count; i++) {
     await createPost(generateRandomPost());
   }
   console.log(`${count} documents générés !`);
 };
 
-// === Indexation ===
+// === 9. Indexation et recherche ===
 const createIndex = async () => {
   if (!localDB.value) return;
   try {
@@ -179,11 +217,10 @@ const createIndex = async () => {
     });
     console.log('Index créé sur "region"');
   } catch (error) {
-    console.error('Erreur lors de la création de l\'index :', error);
+    console.error('Erreur lors de la création de l\'index:', error);
   }
 };
 
-// Recherche par région
 const searchByRegion = async () => {
   if (!localDB.value) return;
   try {
@@ -191,12 +228,13 @@ const searchByRegion = async () => {
       selector: { region: { $eq: searchRegion.value } },
     });
     postsData.value = result.docs;
+    console.log('Résultats de recherche:', result.docs.length, 'documents');
   } catch (error) {
-    console.error('Erreur lors de la recherche :', error);
+    console.error('Erreur lors de la recherche:', error);
   }
 };
 
-// === Gestion des formulaires ===
+// === 10. Gestion des formulaires ===
 const handleSubmit = () => {
   createPost(newPost.value);
   newPost.value = {
@@ -219,9 +257,7 @@ const editPost = (post: Post) => {
   };
 };
 
-const cancelEdit = () => {
-  editingPost.value = null;
-};
+const cancelEdit = () => { editingPost.value = null; };
 
 const updateSubmit = () => {
   if (!editingPost.value) return;
@@ -229,20 +265,29 @@ const updateSubmit = () => {
   cancelEdit();
 };
 
-// === Montage du composant ===
+// === 11. Initialisation ===
 onMounted(() => {
+  console.log('Composant initialisé');
   initDatabases();
-  syncDatabases();
+  if (isOnline.value) syncDatabases();
   createIndex();
   fetchData();
-  // generateAndInsertData(10); // Décommente pour générer 10 pays aléatoires
+  // generateAndInsertData(10); // Décommente pour générer des données de test
 });
 </script>
 
 <template>
   <h1>Gestion des pays</h1>
 
-  <!-- Champ de recherche par région -->
+  <!-- Bouton toggle online/offline -->
+  <section>
+    <button @click="toggleOnlineOffline">
+      {{ isOnline ? 'Passer en mode OFFLINE' : 'Passer en mode ONLINE' }}
+    </button>
+    <span>Statut : {{ isOnline ? 'ONLINE' : 'OFFLINE' }}</span>
+  </section>
+
+  <!-- Recherche par région -->
   <section>
     <h2>Rechercher par région</h2>
     <input v-model="searchRegion" placeholder="Ex: Europe" @keyup.enter="searchByRegion" />
@@ -302,7 +347,8 @@ onMounted(() => {
 </template>
 
 <style scoped>
-form div { margin-bottom: 10px; }
+button { margin-right: 10px; margin-bottom: 10px; }
+span { margin-left: 10px; }
+form div { margin-bottom: 40px; }
 label { display: inline-block; width: 120px; }
-button { margin-right: 10px; }
 </style>
