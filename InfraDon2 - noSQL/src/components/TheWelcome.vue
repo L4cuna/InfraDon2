@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import PouchDB from 'pouchdb';
+import PouchDBFind from 'pouchdb-find';
+
+// Ajout du plugin pour l'indexation et la recherche
+PouchDB.plugin(PouchDBFind);
 
 // === Interfaces ===
 interface Post {
@@ -45,41 +49,38 @@ const newPost = ref<NewPost>({
   languages: '',
   region: '',
   subregion: '',
-  flag: 'https://example.com/flag.png'
+  flag: 'https://flagcdn.com/160x120/fr.png'
 });
 
 const editingPost = ref<Post | null>(null);
 const searchRegion = ref<string>('');
 const isOnline = ref<boolean>(true);
 
-// === 1. Create/Connect Database (https://pouchdb.com/api.html#create_database) ===
+// === 1. Create/Connect Database ===
 const initDatabases = () => {
-  // Base locale
   localDB.value = new PouchDB('local_biblio_db');
-  // Base distante
   remoteDB.value = new PouchDB('http://admin:admin@localhost:5984/firstdbinfradon2');
-  console.log('Bases de données créées/connectées');
+  console.log('✅ Bases de données créées/connectées');
 };
 
-// === 2. Replicate Databases (https://pouchdb.com/api.html#replication) ===
+// === 2. Replicate Databases ===
 const syncDatabases = () => {
   if (!isOnline.value || !localDB.value || !remoteDB.value) return;
 
-  // Synchronisation bidirectionnelle et continue
   syncHandler.value = localDB.value.sync(remoteDB.value, {
     live: true,
     retry: true,
   })
   .on('change', (info) => {
-    console.log('Changement synchronisé:', info);
+    console.log('↔️ Changement synchronisé:', info);
     fetchData();
   })
   .on('denied', (err) => {
-    console.error('Conflit de synchronisation:', err);
-    alert('Conflit détecté. Vérifie les données dans CouchDB et l\'application.');
+    console.error('⚠️ Conflit de synchronisation:', err);
+    alert('Conflit détecté. Vérifiez les données dans CouchDB et l\'application.');
   })
   .on('error', (err) => {
-    console.error('Erreur de synchronisation:', err);
+    console.error('❌ Erreur de synchronisation:', err);
   });
 };
 
@@ -87,44 +88,46 @@ const syncDatabases = () => {
 const toggleOnlineOffline = () => {
   isOnline.value = !isOnline.value;
   if (isOnline.value) {
-    console.log('Mode ONLINE - Synchronisation activée');
+    console.log('🌐 Mode ONLINE - Synchronisation activée');
     syncDatabases();
   } else {
-    console.log('Mode OFFLINE - Synchronisation désactivée');
+    console.log('🔌 Mode OFFLINE - Synchronisation désactivée');
     if (syncHandler.value) {
       syncHandler.value.cancel();
     }
   }
 };
 
-// === 4. Retrieve All Documents (https://pouchdb.com/api.html#batch_fetch) ===
-const fetchData = async () => {
+// === 4. Retrieve All Documents ===
+const fetchData = () => {
   if (!localDB.value) {
     console.warn('Base locale non initialisée');
     return;
   }
-  try {
-    const result = await localDB.value.allDocs({ include_docs: true });
-    postsData.value = result.rows.map(row => row.doc);
-    console.log('Données récupérées:', postsData.value.length, 'documents');
-  } catch (error) {
-    console.error('Erreur lors de la récupération:', error);
-  }
+
+  localDB.value.allDocs({ include_docs: true })
+    .then((docs) => {
+      postsData.value = docs.rows
+        .map((row) => row.doc)
+        .filter((doc): doc is Post => !!doc)
+        .filter((doc) => !doc._id.startsWith("_"));
+    })
+    .catch((err) => console.error("Erreur lors de la récupération des données:", err));
 };
 
-// === 5. Retrieve One Document (https://pouchdb.com/api.html#fetch_document) ===
+// === 5. Retrieve One Document ===
 const getDocument = async (id: string) => {
   if (!localDB.value) return null;
   try {
     const doc = await localDB.value.get(id);
     return doc;
   } catch (error) {
-    console.error('Erreur lors de la récupération du document:', error);
+    console.error('❌ Erreur lors de la récupération du document:', error);
     return null;
   }
 };
 
-// === 6. Create/Update Document (https://pouchdb.com/api.html#create_document) ===
+// === 6. Create/Update Document ===
 const createPost = async (post: NewPost) => {
   if (!localDB.value) {
     console.warn('Base locale non initialisée');
@@ -137,10 +140,10 @@ const createPost = async (post: NewPost) => {
       _id: `country_${Date.now()}`,
     };
     const response = await localDB.value.post(doc);
-    console.log('Document créé:', response.id);
+    console.log('📝 Document créé:', response.id);
     await fetchData();
   } catch (error) {
-    console.error('Erreur lors de la création:', error);
+    console.error('❌ Erreur lors de la création:', error);
   }
 };
 
@@ -158,14 +161,14 @@ const updatePost = async (post: Post) => {
       languages: post.languages.toString().split(',').map(lang => lang.trim()),
     };
     const response = await localDB.value.put(updatedDoc);
-    console.log('Document mis à jour:', response.id);
+    console.log('🔄 Document mis à jour:', response.id);
     await fetchData();
   } catch (error) {
-    console.error('Erreur lors de la mise à jour:', error);
+    console.error('❌ Erreur lors de la mise à jour:', error);
   }
 };
 
-// === 7. Delete Document (https://pouchdb.com/api.html#delete_document) ===
+// === 7. Delete Document ===
 const deletePost = async (post: Post) => {
   if (!localDB.value) {
     console.warn('Base locale non initialisée');
@@ -175,10 +178,10 @@ const deletePost = async (post: Post) => {
     const doc = await getDocument(post._id);
     if (!doc) return;
     const response = await localDB.value.remove(doc);
-    console.log('Document supprimé:', response.id);
+    console.log('🗑️ Document supprimé:', response.id);
     await fetchData();
   } catch (error) {
-    console.error('Erreur lors de la suppression:', error);
+    console.error('❌ Erreur lors de la suppression:', error);
   }
 };
 
@@ -198,14 +201,14 @@ const generateRandomPost = (): NewPost => ({
   ).join(', '),
   region: regions[Math.floor(Math.random() * regions.length)],
   subregion: `${regions[Math.floor(Math.random() * regions.length)]}_Sub`,
-  flag: 'https://example.com/flag.png',
+  flag: 'https://flagcdn.com/160x120/fr.png',
 });
 
 const generateAndInsertData = async (count: number) => {
   for (let i = 0; i < count; i++) {
     await createPost(generateRandomPost());
   }
-  console.log(`${count} documents générés !`);
+  console.log(`✅ ${count} documents générés !`);
 };
 
 // === 9. Indexation et recherche ===
@@ -215,9 +218,9 @@ const createIndex = async () => {
     await localDB.value.createIndex({
       index: { fields: ['region'] },
     });
-    console.log('Index créé sur "region"');
+    console.log('📊 Index créé sur "region"');
   } catch (error) {
-    console.error('Erreur lors de la création de l\'index:', error);
+    console.error('❌ Erreur lors de la création de l\'index:', error);
   }
 };
 
@@ -228,9 +231,9 @@ const searchByRegion = async () => {
       selector: { region: { $eq: searchRegion.value } },
     });
     postsData.value = result.docs;
-    console.log('Résultats de recherche:', result.docs.length, 'documents');
+    console.log('🔍 Résultats de recherche:', result.docs.length, 'documents');
   } catch (error) {
-    console.error('Erreur lors de la recherche:', error);
+    console.error('❌ Erreur lors de la recherche:', error);
   }
 };
 
@@ -246,7 +249,7 @@ const handleSubmit = () => {
     languages: '',
     region: '',
     subregion: '',
-    flag: 'https://example.com/flag.png',
+    flag: 'https://flagcdn.com/160x120/fr.png',
   };
 };
 
@@ -267,7 +270,7 @@ const updateSubmit = () => {
 
 // === 11. Initialisation ===
 onMounted(() => {
-  console.log('Composant initialisé');
+  console.log('🚀 Composant initialisé');
   initDatabases();
   if (isOnline.value) syncDatabases();
   createIndex();
@@ -277,78 +280,268 @@ onMounted(() => {
 </script>
 
 <template>
-  <h1>Gestion des pays</h1>
+  <div class="app-container">
+    <h1>Gestion des Pays</h1>
 
-  <!-- Bouton toggle online/offline -->
-  <section>
-    <button @click="toggleOnlineOffline">
-      {{ isOnline ? 'Passer en mode OFFLINE' : 'Passer en mode ONLINE' }}
-    </button>
-    <span>Statut : {{ isOnline ? 'ONLINE' : 'OFFLINE' }}</span>
-  </section>
+    <!-- Bouton toggle online/offline -->
+    <section class="toggle-section">
+      <button @click="toggleOnlineOffline" class="toggle-button">
+        {{ isOnline ? 'Passer en mode OFFLINE' : 'Passer en mode ONLINE' }}
+      </button>
+      <span class="status">Statut : {{ isOnline ? '🌐 ONLINE' : '🔌 OFFLINE' }}</span>
+    </section>
 
-  <!-- Recherche par région -->
-  <section>
-    <h2>Rechercher par région</h2>
-    <input v-model="searchRegion" placeholder="Ex: Europe" @keyup.enter="searchByRegion" />
-    <button @click="searchByRegion">Rechercher</button>
-    <button @click="fetchData">Réinitialiser</button>
-  </section>
+    <!-- Recherche par région -->
+    <section class="search-section">
+      <h2>Rechercher par région</h2>
+      <div class="search-container">
+        <input v-model="searchRegion" placeholder="Ex: Europe" @keyup.enter="searchByRegion" class="search-input" />
+        <button @click="searchByRegion" class="search-button">Rechercher</button>
+        <button @click="fetchData" class="reset-button">Réinitialiser</button>
+      </div>
+    </section>
 
-  <!-- Liste des pays -->
-  <article v-for="post in postsData" :key="post._id">
-    <h2>{{ post.name }}</h2>
-    <img :src="post.flag" alt="flag" width="100" />
-    <p>Capital: {{ post.capital }}</p>
-    <p>Population: {{ post.population.toLocaleString() }}</p>
-    <p>Région: {{ post.region }} ({{ post.subregion }})</p>
-    <p>Monnaie: {{ post.currency }}</p>
-    <p>Langues: {{ Array.isArray(post.languages) ? post.languages.join(', ') : post.languages }}</p>
-    <div>
-      <button @click="editPost(post)">Modifier</button>
-      <button @click="deletePost(post)">Supprimer</button>
-    </div>
-  </article>
+    <!-- Liste des pays -->
+    <section class="countries-section">
+      <article v-for="post in postsData" :key="post._id" class="country-card">
+        <h2>{{ post.name }}</h2>
+        <img :src="post.flag" alt="flag" class="country-flag" />
+        <p><strong>Capitale:</strong> {{ post.capital }}</p>
+        <p><strong>Population:</strong> {{ post.population.toLocaleString() }}</p>
+        <p><strong>Région:</strong> {{ post.region }} ({{ post.subregion }})</p>
+        <p><strong>Monnaie:</strong> {{ post.currency }}</p>
+        <p><strong>Langues:</strong> {{ Array.isArray(post.languages) ? post.languages.join(', ') : post.languages }}</p>
+        <div class="actions">
+          <button @click="editPost(post)" class="edit-button">Modifier</button>
+          <button @click="deletePost(post)" class="delete-button">Supprimer</button>
+        </div>
+      </article>
+    </section>
 
-  <!-- Formulaire d'édition -->
-  <section v-if="editingPost">
-    <h2>Modifier {{ editingPost.name }}</h2>
-    <form @submit.prevent="updateSubmit">
-      <div><label>Nom: <input v-model="editingPost.name" required /></label></div>
-      <div><label>Capitale: <input v-model="editingPost.capital" required /></label></div>
-      <div><label>Population: <input type="number" v-model.number="editingPost.population" required /></label></div>
-      <div><label>Superficie: <input type="number" v-model.number="editingPost.area" required /></label></div>
-      <div><label>Monnaie: <input v-model="editingPost.currency" required /></label></div>
-      <div><label>Langues (virgules): <input v-model="editingPost.languages" required /></label></div>
-      <div><label>Région: <input v-model="editingPost.region" required /></label></div>
-      <div><label>Sous-région: <input v-model="editingPost.subregion" required /></label></div>
-      <div><label>Drapeau (URL): <input v-model="editingPost.flag" required /></label></div>
-      <button type="submit">Enregistrer</button>
-      <button type="button" @click="cancelEdit">Annuler</button>
-    </form>
-  </section>
+    <!-- Formulaire d'édition -->
+    <section v-if="editingPost" class="form-section">
+      <h2>Modifier {{ editingPost.name }}</h2>
+      <form @submit.prevent="updateSubmit" class="form-container">
+        <div class="form-group"><label>Nom: <input v-model="editingPost.name" required class="form-input" /></label></div>
+        <div class="form-group"><label>Capitale: <input v-model="editingPost.capital" required class="form-input" /></label></div>
+        <div class="form-group"><label>Population: <input type="number" v-model.number="editingPost.population" required class="form-input" /></label></div>
+        <div class="form-group"><label>Superficie: <input type="number" v-model.number="editingPost.area" required class="form-input" /></label></div>
+        <div class="form-group"><label>Monnaie: <input v-model="editingPost.currency" required class="form-input" /></label></div>
+        <div class="form-group"><label>Langues (virgules): <input v-model="editingPost.languages" required class="form-input" /></label></div>
+        <div class="form-group"><label>Région: <input v-model="editingPost.region" required class="form-input" /></label></div>
+        <div class="form-group"><label>Sous-région: <input v-model="editingPost.subregion" required class="form-input" /></label></div>
+        <div class="form-group"><label>Drapeau (URL): <input v-model="editingPost.flag" required class="form-input" /></label></div>
+        <div class="form-actions">
+          <button type="submit" class="submit-button">Enregistrer</button>
+          <button type="button" @click="cancelEdit" class="cancel-button">Annuler</button>
+        </div>
+      </form>
+    </section>
 
-  <!-- Formulaire d'ajout -->
-  <section>
-    <h2>Ajouter un pays</h2>
-    <form @submit.prevent="handleSubmit">
-      <div><label>Nom: <input v-model="newPost.name" required /></label></div>
-      <div><label>Capitale: <input v-model="newPost.capital" required /></label></div>
-      <div><label>Population: <input type="number" v-model.number="newPost.population" required /></label></div>
-      <div><label>Superficie: <input type="number" v-model.number="newPost.area" required /></label></div>
-      <div><label>Monnaie: <input v-model="newPost.currency" required /></label></div>
-      <div><label>Langues (virgules): <input v-model="newPost.languages" required /></label></div>
-      <div><label>Région: <input v-model="newPost.region" required /></label></div>
-      <div><label>Sous-région: <input v-model="newPost.subregion" required /></label></div>
-      <div><label>Drapeau (URL): <input v-model="newPost.flag" required /></label></div>
-      <button type="submit">Ajouter</button>
-    </form>
-  </section>
+    <!-- Formulaire d'ajout -->
+    <section class="form-section">
+      <h2>Ajouter un pays</h2>
+      <form @submit.prevent="handleSubmit" class="form-container">
+        <div class="form-group"><label>Nom: <input v-model="newPost.name" required class="form-input" /></label></div>
+        <div class="form-group"><label>Capitale: <input v-model="newPost.capital" required class="form-input" /></label></div>
+        <div class="form-group"><label>Population: <input type="number" v-model.number="newPost.population" required class="form-input" /></label></div>
+        <div class="form-group"><label>Superficie: <input type="number" v-model.number="newPost.area" required class="form-input" /></label></div>
+        <div class="form-group"><label>Monnaie: <input v-model="newPost.currency" required class="form-input" /></label></div>
+        <div class="form-group"><label>Langues (virgules): <input v-model="newPost.languages" required class="form-input" /></label></div>
+        <div class="form-group"><label>Région: <input v-model="newPost.region" required class="form-input" /></label></div>
+        <div class="form-group"><label>Sous-région: <input v-model="newPost.subregion" required class="form-input" /></label></div>
+        <div class="form-group"><label>Drapeau (URL): <input v-model="newPost.flag" required class="form-input" /></label></div>
+        <div class="form-actions">
+          <button type="submit" class="submit-button">Ajouter</button>
+        </div>
+      </form>
+    </section>
+  </div>
 </template>
 
 <style scoped>
-button { margin-right: 10px; margin-bottom: 10px; }
-span { margin-left: 10px; }
-form div { margin-bottom: 40px; }
-label { display: inline-block; width: 120px; }
+.app-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+  font-family: 'Arial', sans-serif;
+}
+
+h1, h2 {
+  color: #2c3e50;
+}
+
+.toggle-section {
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toggle-button {
+  padding: 8px 16px;
+  background-color: #3498db;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.toggle-button:hover {
+  background-color: #2980b9;
+}
+
+.status {
+  font-weight: bold;
+}
+
+.search-section {
+  margin-bottom: 20px;
+}
+
+.search-container {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.search-input {
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  flex: 1;
+}
+
+.search-button, .reset-button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.search-button {
+  background-color: #2ecc71;
+  color: white;
+}
+
+.search-button:hover {
+  background-color: #27ae60;
+}
+
+.reset-button {
+  background-color: #e74c3c;
+  color: white;
+}
+
+.reset-button:hover {
+  background-color: #c0392b;
+}
+
+.countries-section {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.country-card {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 15px;
+  background-color: white;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.country-flag {
+  width: 100px;
+  height: auto;
+  margin-bottom: 10px;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.edit-button, .delete-button {
+  padding: 5px 10px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.edit-button {
+  background-color: #f39c12;
+  color: white;
+}
+
+.edit-button:hover {
+  background-color: #e67e22;
+}
+
+.delete-button {
+  background-color: #e74c3c;
+  color: white;
+}
+
+.delete-button:hover {
+  background-color: #c0392b;
+}
+
+.form-section {
+  margin-bottom: 20px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 15px;
+  background-color: #f9f9f9;
+}
+
+.form-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.form-input {
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.form-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.submit-button, .cancel-button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.submit-button {
+  background-color: #2ecc71;
+  color: white;
+}
+
+.submit-button:hover {
+  background-color: #27ae60;
+}
+
+.cancel-button {
+  background-color: #e74c3c;
+  color: white;
+}
+
+.cancel-button:hover {
+  background-color: #c0392b;
+}
 </style>
