@@ -54,7 +54,7 @@ const searchRegion = ref<string>('');
 const initDatabases = () => {
   localDB.value = new PouchDB('local_biblio_db');
   remoteDB.value = new PouchDB('http://admin:admin@localhost:5984/firstdbinfradon2');
-  console.log('✅ Bases locale et distante initialisées');
+  console.log('Bases locale et distante initialisées');
 };
 
 // === Synchronisation des bases ===
@@ -65,11 +65,11 @@ const syncDatabases = () => {
     retry: true,
   })
   .on('change', () => {
-    console.log('↔️ Synchronisation en cours...');
+    console.log('Synchronisation en cours...');
     fetchData();
   })
   .on('error', (err) => {
-    console.error('❌ Erreur de synchronisation :', err);
+    console.error('Erreur de synchronisation :', err);
   });
 };
 
@@ -82,9 +82,9 @@ const fetchData = async () => {
   try {
     const result = await localDB.value.allDocs({ include_docs: true });
     postsData.value = result.rows.map(row => row.doc);
-    console.log('📋 Données locales mises à jour');
+    console.log('Données locales mises à jour');
   } catch (error) {
-    console.error('❌ Erreur lors de la récupération :', error);
+    console.error('Erreur lors de la récupération :', error);
   }
 };
 
@@ -104,7 +104,7 @@ const createPost = async (post: NewPost) => {
     await localDB.value.post(doc);
     await fetchData();
   } catch (error) {
-    console.error('❌ Erreur lors de l\'ajout :', error);
+    console.error('Erreur lors de l\'ajout :', error);
   }
 };
 
@@ -124,7 +124,7 @@ const updatePost = async (post: Post) => {
     await localDB.value.put(updatedDoc);
     await fetchData();
   } catch (error) {
-    console.error('❌ Erreur lors de la mise à jour :', error);
+    console.error('Erreur lors de la mise à jour :', error);
   }
 };
 
@@ -139,7 +139,7 @@ const deletePost = async (post: Post) => {
     await localDB.value.remove(doc);
     await fetchData();
   } catch (error) {
-    console.error('❌ Erreur lors de la suppression :', error);
+    console.error('Erreur lors de la suppression :', error);
   }
 };
 
@@ -167,7 +167,7 @@ const generateAndInsertData = async (count: number) => {
   for (let i = 0; i < count; i++) {
     await createPost(generateRandomPost());
   }
-  console.log(`✅ ${count} documents générés !`);
+  console.log(`${count} documents générés !`);
 };
 
 // === Indexation ===
@@ -177,9 +177,9 @@ const createIndex = async () => {
     await localDB.value.createIndex({
       index: { fields: ['region'] },
     });
-    console.log('📊 Index créé sur "region"');
+    console.log('Index créé sur "region"');
   } catch (error) {
-    console.error('❌ Erreur lors de la création de l\'index :', error);
+    console.error('Erreur lors de la création de l\'index :', error);
   }
 };
 
@@ -192,7 +192,7 @@ const searchByRegion = async () => {
     });
     postsData.value = result.docs;
   } catch (error) {
-    console.error('❌ Erreur lors de la recherche :', error);
+    console.error('Erreur lors de la recherche :', error);
   }
 };
 
