@@ -34,7 +34,7 @@ const localDB = ref<PouchDB.Database>();
 const remoteDB = ref<PouchDB.Database>();
 const postsData = ref<Post[]>([]);
 
-// === Données réactives pour le formulaire ===
+// === Données réactives pour les formulaires ===
 const newPost = ref<NewPost>({
   name: '',
   capital: '',
@@ -44,11 +44,11 @@ const newPost = ref<NewPost>({
   languages: '',
   region: '',
   subregion: '',
-  flag: ''
+  flag: 'https://example.com/flag.png'
 });
 
-// === Variables réactives pour gérer l'édition ===
 const editingPost = ref<Post | null>(null);
+const searchRegion = ref<string>('');
 
 // === Initialisation des bases locale et distante ===
 const initDatabases = () => {
@@ -61,12 +61,12 @@ const initDatabases = () => {
 const syncDatabases = () => {
   if (!localDB.value || !remoteDB.value) return;
   localDB.value.sync(remoteDB.value, {
-    live: true, // Synchronisation en temps réel
-    retry: true, // Réessayer en cas d'échec
+    live: true,
+    retry: true,
   })
   .on('change', () => {
     console.log('↔️ Synchronisation en cours...');
-    fetchData(); // Rafraîchir les données locales
+    fetchData();
   })
   .on('error', (err) => {
     console.error('❌ Erreur de synchronisation :', err);
@@ -82,34 +82,33 @@ const fetchData = async () => {
   try {
     const result = await localDB.value.allDocs({ include_docs: true });
     postsData.value = result.rows.map(row => row.doc);
-    console.log('📋 Données locales mises à jour :', postsData.value);
+    console.log('📋 Données locales mises à jour');
   } catch (error) {
     console.error('❌ Erreur lors de la récupération :', error);
   }
 };
 
-// === Ajouter un document localement ===
-const createPost = async (newPost: NewPost) => {
+// === CRUD ===
+// Ajouter un document
+const createPost = async (post: NewPost) => {
   if (!localDB.value) {
     console.warn('Base locale non initialisée');
     return;
   }
   try {
-    const languagesArray = newPost.languages.split(',').map(lang => lang.trim());
     const doc = {
-      ...newPost,
-      languages: languagesArray,
+      ...post,
+      languages: post.languages.split(',').map(lang => lang.trim()),
       _id: `country_${Date.now()}`,
     };
     await localDB.value.post(doc);
-    console.log('📝 Document ajouté localement (sera synchronisé)');
-    await fetchData(); // Rafraîchir la liste
+    await fetchData();
   } catch (error) {
     console.error('❌ Erreur lors de l\'ajout :', error);
   }
 };
 
-// === Modifier un document ===
+// Modifier un document
 const updatePost = async (post: Post) => {
   if (!localDB.value) {
     console.warn('Base locale non initialisée');
@@ -117,16 +116,19 @@ const updatePost = async (post: Post) => {
   }
   try {
     const doc = await localDB.value.get(post._id);
-    const updatedDoc = { ...doc, ...post };
+    const updatedDoc = {
+      ...doc,
+      ...post,
+      languages: post.languages.toString().split(',').map(lang => lang.trim()),
+    };
     await localDB.value.put(updatedDoc);
-    console.log('🔄 Document mis à jour localement (sera synchronisé)');
     await fetchData();
   } catch (error) {
     console.error('❌ Erreur lors de la mise à jour :', error);
   }
 };
 
-// === Supprimer un document ===
+// Supprimer un document
 const deletePost = async (post: Post) => {
   if (!localDB.value) {
     console.warn('Base locale non initialisée');
@@ -135,14 +137,66 @@ const deletePost = async (post: Post) => {
   try {
     const doc = await localDB.value.get(post._id);
     await localDB.value.remove(doc);
-    console.log('🗑️ Document supprimé localement (sera synchronisé)');
     await fetchData();
   } catch (error) {
     console.error('❌ Erreur lors de la suppression :', error);
   }
 };
 
-// === Gestion du formulaire d'ajout ===
+// === Factory pour générer des données ===
+const regions = ['Europe', 'Asia', 'Africa', 'Americas', 'Oceania'];
+const currencies = ['EUR', 'USD', 'JPY', 'GBP', 'AUD'];
+const languagesList = ['French', 'English', 'Spanish', 'German', 'Chinese'];
+
+const generateRandomPost = (): NewPost => ({
+  name: `Country_${Math.floor(Math.random() * 1000)}`,
+  capital: `Capital_${Math.floor(Math.random() * 1000)}`,
+  population: Math.floor(Math.random() * 100000000),
+  area: Math.floor(Math.random() * 1000000),
+  currency: currencies[Math.floor(Math.random() * currencies.length)],
+  languages: Array.from({ length: 2 }, () =>
+    languagesList[Math.floor(Math.random() * languagesList.length)]
+  ).join(', '),
+  region: regions[Math.floor(Math.random() * regions.length)],
+  subregion: `${regions[Math.floor(Math.random() * regions.length)]}_Sub`,
+  flag: 'https://example.com/flag.png',
+});
+
+const generateAndInsertData = async (count: number) => {
+  if (!localDB.value) return;
+  for (let i = 0; i < count; i++) {
+    await createPost(generateRandomPost());
+  }
+  console.log(`✅ ${count} documents générés !`);
+};
+
+// === Indexation ===
+const createIndex = async () => {
+  if (!localDB.value) return;
+  try {
+    await localDB.value.createIndex({
+      index: { fields: ['region'] },
+    });
+    console.log('📊 Index créé sur "region"');
+  } catch (error) {
+    console.error('❌ Erreur lors de la création de l\'index :', error);
+  }
+};
+
+// Recherche par région
+const searchByRegion = async () => {
+  if (!localDB.value) return;
+  try {
+    const result = await localDB.value.find({
+      selector: { region: { $eq: searchRegion.value } },
+    });
+    postsData.value = result.docs;
+  } catch (error) {
+    console.error('❌ Erreur lors de la recherche :', error);
+  }
+};
+
+// === Gestion des formulaires ===
 const handleSubmit = () => {
   createPost(newPost.value);
   newPost.value = {
@@ -154,14 +208,15 @@ const handleSubmit = () => {
     languages: '',
     region: '',
     subregion: '',
-    flag: ''
+    flag: 'https://example.com/flag.png',
   };
 };
 
-// === Gestion de l'édition ===
 const editPost = (post: Post) => {
-  const languagesString = Array.isArray(post.languages) ? post.languages.join(', ') : post.languages;
-  editingPost.value = { ...post, languages: languagesString };
+  editingPost.value = {
+    ...post,
+    languages: Array.isArray(post.languages) ? post.languages.join(', ') : post.languages,
+  };
 };
 
 const cancelEdit = () => {
@@ -170,70 +225,84 @@ const cancelEdit = () => {
 
 const updateSubmit = () => {
   if (!editingPost.value) return;
-  const languagesArray = editingPost.value.languages.toString().split(',').map(lang => lang.trim());
-  updatePost({ ...editingPost.value, languages: languagesArray });
+  updatePost(editingPost.value);
   cancelEdit();
 };
 
 // === Montage du composant ===
 onMounted(() => {
-  console.log('🚀 Composant initialisé');
   initDatabases();
   syncDatabases();
+  createIndex();
   fetchData();
+  // generateAndInsertData(10); // Décommente pour générer 10 pays aléatoires
 });
 </script>
 
 <template>
-  <!-- Affichage des pays (inchangé) -->
   <h1>Gestion des pays</h1>
+
+  <!-- Champ de recherche par région -->
+  <section>
+    <h2>Rechercher par région</h2>
+    <input v-model="searchRegion" placeholder="Ex: Europe" @keyup.enter="searchByRegion" />
+    <button @click="searchByRegion">Rechercher</button>
+    <button @click="fetchData">Réinitialiser</button>
+  </section>
+
+  <!-- Liste des pays -->
   <article v-for="post in postsData" :key="post._id">
     <h2>{{ post.name }}</h2>
     <img :src="post.flag" alt="flag" width="100" />
     <p>Capital: {{ post.capital }}</p>
     <p>Population: {{ post.population.toLocaleString() }}</p>
-    <p>Region: {{ post.region }} ({{ post.subregion }})</p>
-    <p>Currency: {{ post.currency }}</p>
-    <p>Languages: {{ Array.isArray(post.languages) ? post.languages.join(', ') : post.languages }}</p>
+    <p>Région: {{ post.region }} ({{ post.subregion }})</p>
+    <p>Monnaie: {{ post.currency }}</p>
+    <p>Langues: {{ Array.isArray(post.languages) ? post.languages.join(', ') : post.languages }}</p>
     <div>
       <button @click="editPost(post)">Modifier</button>
       <button @click="deletePost(post)">Supprimer</button>
     </div>
   </article>
 
-  <!-- Formulaire d'édition (inchangé) -->
+  <!-- Formulaire d'édition -->
   <section v-if="editingPost">
-    <h2>Modifier un pays</h2>
+    <h2>Modifier {{ editingPost.name }}</h2>
     <form @submit.prevent="updateSubmit">
-      <!-- Champs du formulaire (inchangés) -->
-      <div>
-        <label for="editName">Nom :</label>
-        <input type="text" id="editName" v-model="editingPost.name" required />
-      </div>
-      <!-- ... (autres champs) ... -->
+      <div><label>Nom: <input v-model="editingPost.name" required /></label></div>
+      <div><label>Capitale: <input v-model="editingPost.capital" required /></label></div>
+      <div><label>Population: <input type="number" v-model.number="editingPost.population" required /></label></div>
+      <div><label>Superficie: <input type="number" v-model.number="editingPost.area" required /></label></div>
+      <div><label>Monnaie: <input v-model="editingPost.currency" required /></label></div>
+      <div><label>Langues (virgules): <input v-model="editingPost.languages" required /></label></div>
+      <div><label>Région: <input v-model="editingPost.region" required /></label></div>
+      <div><label>Sous-région: <input v-model="editingPost.subregion" required /></label></div>
+      <div><label>Drapeau (URL): <input v-model="editingPost.flag" required /></label></div>
       <button type="submit">Enregistrer</button>
       <button type="button" @click="cancelEdit">Annuler</button>
     </form>
   </section>
 
-  <!-- Formulaire d'ajout (inchangé) -->
+  <!-- Formulaire d'ajout -->
   <section>
     <h2>Ajouter un pays</h2>
     <form @submit.prevent="handleSubmit">
-      <!-- Champs du formulaire (inchangés) -->
-      <div>
-        <label for="name">Nom :</label>
-        <input type="text" id="name" v-model="newPost.name" required />
-      </div>
-      <!-- ... (autres champs) ... -->
+      <div><label>Nom: <input v-model="newPost.name" required /></label></div>
+      <div><label>Capitale: <input v-model="newPost.capital" required /></label></div>
+      <div><label>Population: <input type="number" v-model.number="newPost.population" required /></label></div>
+      <div><label>Superficie: <input type="number" v-model.number="newPost.area" required /></label></div>
+      <div><label>Monnaie: <input v-model="newPost.currency" required /></label></div>
+      <div><label>Langues (virgules): <input v-model="newPost.languages" required /></label></div>
+      <div><label>Région: <input v-model="newPost.region" required /></label></div>
+      <div><label>Sous-région: <input v-model="newPost.subregion" required /></label></div>
+      <div><label>Drapeau (URL): <input v-model="newPost.flag" required /></label></div>
       <button type="submit">Ajouter</button>
     </form>
   </section>
 </template>
 
 <style scoped>
-/* Styles inchangés */
-ul { list-style: none; padding: 0; }
 form div { margin-bottom: 10px; }
-label { display: inline-block; width: 150px; }
+label { display: inline-block; width: 120px; }
+button { margin-right: 10px; }
 </style>
