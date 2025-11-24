@@ -1,246 +1,31 @@
-<script setup lang="ts">
+<script setup>
+// Importations
 import { onMounted, ref } from 'vue';
 import PouchDB from 'pouchdb';
 import PouchDBFind from 'pouchdb-find';
-
-// Ajout du plugin pour l'indexation et la recherche
 PouchDB.plugin(PouchDBFind);
 
-// === Interfaces ===
-interface Post {
-  _id: string;
-  _rev?: string;
-  name: string;
-  capital: string;
-  population: number;
-  area: number;
-  currency: string;
-  languages: string[] | string;
-  region: string;
-  subregion: string;
-  flag: string;
-}
-
-interface NewPost {
-  name: string;
-  capital: string;
-  population: number;
-  area: number;
-  currency: string;
-  languages: string;
-  region: string;
-  subregion: string;
-  flag: string;
-}
-
-// === Références aux bases et données ===
-const localDB = ref<PouchDB.Database>();
-const remoteDB = ref<PouchDB.Database>();
-const postsData = ref<Post[]>([]);
-const syncHandler = ref<any>(null);
-
-// === Données réactives ===
-const newPost = ref<NewPost>({
-  name: '',
-  capital: '',
-  population: 0,
-  area: 0,
-  currency: '',
-  languages: '',
-  region: '',
-  subregion: '',
-  flag: 'https://flagcdn.com/160x120/fr.png'
-});
-
-const editingPost = ref<Post | null>(null);
-const searchRegion = ref<string>('');
-const isOnline = ref<boolean>(true);
-
-// === 1. Create/Connect Database ===
-const initDatabases = () => {
-  localDB.value = new PouchDB('local_biblio_db');
-  remoteDB.value = new PouchDB('http://admin:admin@localhost:5984/firstdbinfradon2');
-  console.log('✅ Bases de données créées/connectées');
+// Interfaces
+const countryProps = {
+  _id: String,
+  _rev: { type: String, default: null },
+  name: String,
+  capital: String,
+  population: Number,
+  area: Number,
+  currency: String,
+  languages: [String, Array],
+  region: String,
+  subregion: String,
+  flag: String
 };
 
-// === 2. Replicate Databases ===
-const syncDatabases = () => {
-  if (!isOnline.value || !localDB.value || !remoteDB.value) return;
-
-  syncHandler.value = localDB.value.sync(remoteDB.value, {
-    live: true,
-    retry: true,
-  })
-  .on('change', (info) => {
-    console.log('↔️ Changement synchronisé:', info);
-    fetchData();
-  })
-  .on('denied', (err) => {
-    console.error('⚠️ Conflit de synchronisation:', err);
-    alert('Conflit détecté. Vérifiez les données dans CouchDB et l\'application.');
-  })
-  .on('error', (err) => {
-    console.error('❌ Erreur de synchronisation:', err);
-  });
-};
-
-// === 3. Toggle Online/Offline ===
-const toggleOnlineOffline = () => {
-  isOnline.value = !isOnline.value;
-  if (isOnline.value) {
-    console.log('🌐 Mode ONLINE - Synchronisation activée');
-    syncDatabases();
-  } else {
-    console.log('🔌 Mode OFFLINE - Synchronisation désactivée');
-    if (syncHandler.value) {
-      syncHandler.value.cancel();
-    }
-  }
-};
-
-// === 4. Retrieve All Documents ===
-const fetchData = () => {
-  if (!localDB.value) {
-    console.warn('Base locale non initialisée');
-    return;
-  }
-
-  localDB.value.allDocs({ include_docs: true })
-    .then((docs) => {
-      postsData.value = docs.rows
-        .map((row) => row.doc)
-        .filter((doc): doc is Post => !!doc)
-        .filter((doc) => !doc._id.startsWith("_"));
-    })
-    .catch((err) => console.error("Erreur lors de la récupération des données:", err));
-};
-
-// === 5. Retrieve One Document ===
-const getDocument = async (id: string) => {
-  if (!localDB.value) return null;
-  try {
-    const doc = await localDB.value.get(id);
-    return doc;
-  } catch (error) {
-    console.error('❌ Erreur lors de la récupération du document:', error);
-    return null;
-  }
-};
-
-// === 6. Create/Update Document ===
-const createPost = async (post: NewPost) => {
-  if (!localDB.value) {
-    console.warn('Base locale non initialisée');
-    return;
-  }
-  try {
-    const doc = {
-      ...post,
-      languages: post.languages.split(',').map(lang => lang.trim()),
-      _id: `country_${Date.now()}`,
-    };
-    const response = await localDB.value.post(doc);
-    console.log('📝 Document créé:', response.id);
-    await fetchData();
-  } catch (error) {
-    console.error('❌ Erreur lors de la création:', error);
-  }
-};
-
-const updatePost = async (post: Post) => {
-  if (!localDB.value) {
-    console.warn('Base locale non initialisée');
-    return;
-  }
-  try {
-    const doc = await getDocument(post._id);
-    if (!doc) return;
-    const updatedDoc = {
-      ...doc,
-      ...post,
-      languages: post.languages.toString().split(',').map(lang => lang.trim()),
-    };
-    const response = await localDB.value.put(updatedDoc);
-    console.log('🔄 Document mis à jour:', response.id);
-    await fetchData();
-  } catch (error) {
-    console.error('❌ Erreur lors de la mise à jour:', error);
-  }
-};
-
-// === 7. Delete Document ===
-const deletePost = async (post: Post) => {
-  if (!localDB.value) {
-    console.warn('Base locale non initialisée');
-    return;
-  }
-  try {
-    const doc = await getDocument(post._id);
-    if (!doc) return;
-    const response = await localDB.value.remove(doc);
-    console.log('🗑️ Document supprimé:', response.id);
-    await fetchData();
-  } catch (error) {
-    console.error('❌ Erreur lors de la suppression:', error);
-  }
-};
-
-// === 8. Factory pour générer des données ===
-const regions = ['Europe', 'Asia', 'Africa', 'Americas', 'Oceania'];
-const currencies = ['EUR', 'USD', 'JPY', 'GBP', 'AUD'];
-const languagesList = ['French', 'English', 'Spanish', 'German', 'Chinese'];
-
-const generateRandomPost = (): NewPost => ({
-  name: `Country_${Math.floor(Math.random() * 1000)}`,
-  capital: `Capital_${Math.floor(Math.random() * 1000)}`,
-  population: Math.floor(Math.random() * 100000000),
-  area: Math.floor(Math.random() * 1000000),
-  currency: currencies[Math.floor(Math.random() * currencies.length)],
-  languages: Array.from({ length: 2 }, () =>
-    languagesList[Math.floor(Math.random() * languagesList.length)]
-  ).join(', '),
-  region: regions[Math.floor(Math.random() * regions.length)],
-  subregion: `${regions[Math.floor(Math.random() * regions.length)]}_Sub`,
-  flag: 'https://flagcdn.com/160x120/fr.png',
-});
-
-const generateAndInsertData = async (count: number) => {
-  for (let i = 0; i < count; i++) {
-    await createPost(generateRandomPost());
-  }
-  console.log(`✅ ${count} documents générés !`);
-};
-
-// === 9. Indexation et recherche ===
-const createIndex = async () => {
-  if (!localDB.value) return;
-  try {
-    await localDB.value.createIndex({
-      index: { fields: ['region'] },
-    });
-    console.log('📊 Index créé sur "region"');
-  } catch (error) {
-    console.error('❌ Erreur lors de la création de l\'index:', error);
-  }
-};
-
-const searchByRegion = async () => {
-  if (!localDB.value) return;
-  try {
-    const result = await localDB.value.find({
-      selector: { region: { $eq: searchRegion.value } },
-    });
-    postsData.value = result.docs;
-    console.log('🔍 Résultats de recherche:', result.docs.length, 'documents');
-  } catch (error) {
-    console.error('❌ Erreur lors de la recherche:', error);
-  }
-};
-
-// === 10. Gestion des formulaires ===
-const handleSubmit = () => {
-  createPost(newPost.value);
-  newPost.value = {
+// État réactif
+const state = ref({
+  localDB: null,
+  remoteDB: null,
+  countries: [],
+  newCountry: {
     name: '',
     capital: '',
     population: 0,
@@ -249,33 +34,185 @@ const handleSubmit = () => {
     languages: '',
     region: '',
     subregion: '',
-    flag: 'https://flagcdn.com/160x120/fr.png',
-  };
+    flag: 'https://flagcdn.com/160x120/fr.png'
+  },
+  editingCountryId: null,
+  searchRegion: '',
+  isOnline: true,
+  syncHandler: null
+});
+
+// Méthodes
+const methods = {
+  initDatabases() {
+    state.value.localDB = new PouchDB('local_countries_db');
+    state.value.remoteDB = new PouchDB('http://admin:admin@localhost:5984/firstdbinfradon2');
+    console.log('Bases de données créées/connectées');
+  },
+
+  syncDatabases() {
+    if (!state.value.isOnline || !state.value.localDB || !state.value.remoteDB) return;
+
+    state.value.syncHandler = state.value.localDB.sync(state.value.remoteDB, {
+      live: true,
+      retry: true,
+    })
+    .on('change', methods.fetchData)
+    .on('denied', methods.handleSyncError)
+    .on('error', methods.handleSyncError);
+  },
+
+  toggleOnlineOffline() {
+    state.value.isOnline = !state.value.isOnline;
+    if (state.value.isOnline) {
+      console.log('Mode ONLINE - Synchronisation activée');
+      methods.syncDatabases();
+    } else {
+      console.log('Mode OFFLINE - Synchronisation désactivée');
+      if (state.value.syncHandler) {
+        state.value.syncHandler.cancel();
+      }
+    }
+  },
+
+  async fetchData() {
+    if (!state.value.localDB) return;
+
+    try {
+      const result = await state.value.localDB.allDocs({ include_docs: true });
+      state.value.countries = result.rows
+        .map(row => row.doc)
+        .filter(doc => doc && !doc._id.startsWith('_'));
+    } catch (error) {
+      console.error('Erreur lors de la récupération des données:', error);
+    }
+  },
+
+  async getDocument(id) {
+    if (!state.value.localDB) return null;
+    try {
+      return await state.value.localDB.get(id);
+    } catch (error) {
+      console.error('Erreur lors de la récupération du document:', error);
+      return null;
+    }
+  },
+
+  async createCountry() {
+    if (!state.value.localDB) return;
+
+    try {
+      const doc = {
+        ...state.value.newCountry,
+        languages: state.value.newCountry.languages.split(',').map(lang => lang.trim()),
+        _id: `country_${Date.now()}`
+      };
+
+      await state.value.localDB.post(doc);
+      methods.resetNewCountryForm();
+      await methods.fetchData();
+    } catch (error) {
+      console.error('Erreur lors de la création:', error);
+    }
+  },
+
+  async updateCountry() {
+    if (!state.value.localDB || !state.value.editingCountryId) return;
+
+    try {
+      const doc = await methods.getDocument(state.value.editingCountryId);
+      if (!doc) return;
+
+      const updatedDoc = {
+        ...doc,
+        ...state.value.newCountry,
+        languages: state.value.newCountry.languages.split(',').map(lang => lang.trim())
+      };
+
+      await state.value.localDB.put(updatedDoc);
+      methods.resetNewCountryForm();
+      state.value.editingCountryId = null;
+      await methods.fetchData();
+    } catch (error) {
+      console.error('Erreur lors de la mise à jour:', error);
+    }
+  },
+
+  async deleteCountry(id) {
+    if (!state.value.localDB) return;
+
+    try {
+      const doc = await methods.getDocument(id);
+      if (!doc) return;
+
+      await state.value.localDB.remove(doc);
+      await methods.fetchData();
+    } catch (error) {
+      console.error('Erreur lors de la suppression:', error);
+    }
+  },
+
+  startEditing(country) {
+    state.value.newCountry = {
+      ...country,
+      languages: Array.isArray(country.languages) ? country.languages.join(', ') : country.languages
+    };
+    state.value.editingCountryId = country._id;
+  },
+
+  cancelEditing() {
+    methods.resetNewCountryForm();
+    state.value.editingCountryId = null;
+  },
+
+  resetNewCountryForm() {
+    state.value.newCountry = {
+      name: '',
+      capital: '',
+      population: 0,
+      area: 0,
+      currency: '',
+      languages: '',
+      region: '',
+      subregion: '',
+      flag: 'https://flagcdn.com/160x120/fr.png'
+    };
+  },
+
+  handleSyncError(error) {
+    console.error('Erreur de synchronisation:', error);
+  },
+
+  async createIndex() {
+    if (!state.value.localDB) return;
+    try {
+      await state.value.localDB.createIndex({ index: { fields: ['region'] } });
+      console.log('Index créé sur "region"');
+    } catch (error) {
+      console.error('Erreur lors de la création de l\'index:', error);
+    }
+  },
+
+  async searchByRegion() {
+    if (!state.value.localDB || !state.value.searchRegion) return;
+
+    try {
+      const result = await state.value.localDB.find({
+        selector: { region: { $eq: state.value.searchRegion } }
+      });
+      state.value.countries = result.docs;
+    } catch (error) {
+      console.error('Erreur lors de la recherche:', error);
+    }
+  }
 };
 
-const editPost = (post: Post) => {
-  editingPost.value = {
-    ...post,
-    languages: Array.isArray(post.languages) ? post.languages.join(', ') : post.languages,
-  };
-};
-
-const cancelEdit = () => { editingPost.value = null; };
-
-const updateSubmit = () => {
-  if (!editingPost.value) return;
-  updatePost(editingPost.value);
-  cancelEdit();
-};
-
-// === 11. Initialisation ===
+// Cycle de vie
 onMounted(() => {
-  console.log('🚀 Composant initialisé');
-  initDatabases();
-  if (isOnline.value) syncDatabases();
-  createIndex();
-  fetchData();
-  // generateAndInsertData(10); // Décommente pour générer des données de test
+  methods.initDatabases();
+  if (state.value.isOnline) methods.syncDatabases();
+  methods.createIndex();
+  methods.fetchData();
 });
 </script>
 
@@ -283,74 +220,172 @@ onMounted(() => {
   <div class="app-container">
     <h1>Gestion des Pays</h1>
 
-    <!-- Bouton toggle online/offline -->
+    <!-- Toggle Online/Offline -->
     <section class="toggle-section">
-      <button @click="toggleOnlineOffline" class="toggle-button">
-        {{ isOnline ? 'Passer en mode OFFLINE' : 'Passer en mode ONLINE' }}
+      <button @click="methods.toggleOnlineOffline" class="toggle-button">
+        {{ state.isOnline ? 'Passer en mode OFFLINE' : 'Passer en mode ONLINE' }}
       </button>
-      <span class="status">Statut : {{ isOnline ? '🌐 ONLINE' : '🔌 OFFLINE' }}</span>
+      <span class="status">Statut : {{ state.isOnline ? 'ONLINE' : 'OFFLINE' }}</span>
     </section>
 
     <!-- Recherche par région -->
     <section class="search-section">
       <h2>Rechercher par région</h2>
       <div class="search-container">
-        <input v-model="searchRegion" placeholder="Ex: Europe" @keyup.enter="searchByRegion" class="search-input" />
-        <button @click="searchByRegion" class="search-button">Rechercher</button>
-        <button @click="fetchData" class="reset-button">Réinitialiser</button>
+        <input
+          v-model="state.searchRegion"
+          placeholder="Ex: Europe"
+          @keyup.enter="methods.searchByRegion"
+          class="search-input"
+        />
+        <button @click="methods.searchByRegion" class="search-button">Rechercher</button>
+        <button @click="methods.fetchData" class="reset-button">Réinitialiser</button>
       </div>
     </section>
 
     <!-- Liste des pays -->
     <section class="countries-section">
-      <article v-for="post in postsData" :key="post._id" class="country-card">
-        <h2>{{ post.name }}</h2>
-        <img :src="post.flag" alt="flag" class="country-flag" />
-        <p><strong>Capitale:</strong> {{ post.capital }}</p>
-        <p><strong>Population:</strong> {{ post.population.toLocaleString() }}</p>
-        <p><strong>Région:</strong> {{ post.region }} ({{ post.subregion }})</p>
-        <p><strong>Monnaie:</strong> {{ post.currency }}</p>
-        <p><strong>Langues:</strong> {{ Array.isArray(post.languages) ? post.languages.join(', ') : post.languages }}</p>
-        <div class="actions">
-          <button @click="editPost(post)" class="edit-button">Modifier</button>
-          <button @click="deletePost(post)" class="delete-button">Supprimer</button>
+      <div v-for="country in state.countries" :key="country._id" class="country-card">
+        <div class="country-header">
+          <h2>{{ country.name }}</h2>
+          <img :src="country.flag" alt="flag" class="country-flag" />
         </div>
-      </article>
-    </section>
 
-    <!-- Formulaire d'édition -->
-    <section v-if="editingPost" class="form-section">
-      <h2>Modifier {{ editingPost.name }}</h2>
-      <form @submit.prevent="updateSubmit" class="form-container">
-        <div class="form-group"><label>Nom: <input v-model="editingPost.name" required class="form-input" /></label></div>
-        <div class="form-group"><label>Capitale: <input v-model="editingPost.capital" required class="form-input" /></label></div>
-        <div class="form-group"><label>Population: <input type="number" v-model.number="editingPost.population" required class="form-input" /></label></div>
-        <div class="form-group"><label>Superficie: <input type="number" v-model.number="editingPost.area" required class="form-input" /></label></div>
-        <div class="form-group"><label>Monnaie: <input v-model="editingPost.currency" required class="form-input" /></label></div>
-        <div class="form-group"><label>Langues (virgules): <input v-model="editingPost.languages" required class="form-input" /></label></div>
-        <div class="form-group"><label>Région: <input v-model="editingPost.region" required class="form-input" /></label></div>
-        <div class="form-group"><label>Sous-région: <input v-model="editingPost.subregion" required class="form-input" /></label></div>
-        <div class="form-group"><label>Drapeau (URL): <input v-model="editingPost.flag" required class="form-input" /></label></div>
-        <div class="form-actions">
-          <button type="submit" class="submit-button">Enregistrer</button>
-          <button type="button" @click="cancelEdit" class="cancel-button">Annuler</button>
+        <div class="country-details">
+          <p><strong>Capitale:</strong> {{ country.capital }}</p>
+          <p><strong>Population:</strong> {{ country.population.toLocaleString() }}</p>
+          <p><strong>Région:</strong> {{ country.region }} ({{ country.subregion }})</p>
+          <p><strong>Monnaie:</strong> {{ country.currency }}</p>
+          <p><strong>Langues:</strong>
+            {{
+              Array.isArray(country.languages)
+                ? country.languages.join(', ')
+                : country.languages
+            }}
+          </p>
         </div>
-      </form>
+
+        <div class="country-actions">
+          <button @click="methods.startEditing(country)" class="edit-button">
+            {{ state.editingCountryId === country._id ? 'Annuler' : 'Modifier' }}
+          </button>
+          <button @click="methods.deleteCountry(country._id)" class="delete-button">Supprimer</button>
+        </div>
+
+        <!-- Formulaire de modification intégré -->
+        <div v-if="state.editingCountryId === country._id" class="edit-form">
+          <form @submit.prevent="methods.updateCountry" class="form-container">
+            <div class="form-row">
+              <div class="form-group">
+                <label>Nom</label>
+                <input v-model="state.newCountry.name" required class="form-input" />
+              </div>
+              <div class="form-group">
+                <label>Capitale</label>
+                <input v-model="state.newCountry.capital" required class="form-input" />
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label>Population</label>
+                <input type="number" v-model.number="state.newCountry.population" required class="form-input" />
+              </div>
+              <div class="form-group">
+                <label>Superficie</label>
+                <input type="number" v-model.number="state.newCountry.area" required class="form-input" />
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label>Monnaie</label>
+                <input v-model="state.newCountry.currency" required class="form-input" />
+              </div>
+              <div class="form-group">
+                <label>Langues</label>
+                <input v-model="state.newCountry.languages" placeholder="Langues séparées par des virgules" required class="form-input" />
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label>Région</label>
+                <input v-model="state.newCountry.region" required class="form-input" />
+              </div>
+              <div class="form-group">
+                <label>Sous-région</label>
+                <input v-model="state.newCountry.subregion" required class="form-input" />
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Drapeau (URL)</label>
+              <input v-model="state.newCountry.flag" required class="form-input" />
+            </div>
+
+            <div class="form-actions">
+              <button type="submit" class="submit-button">Enregistrer</button>
+              <button type="button" @click="methods.cancelEditing" class="cancel-button">Annuler</button>
+            </div>
+          </form>
+        </div>
+      </div>
     </section>
 
     <!-- Formulaire d'ajout -->
     <section class="form-section">
       <h2>Ajouter un pays</h2>
-      <form @submit.prevent="handleSubmit" class="form-container">
-        <div class="form-group"><label>Nom: <input v-model="newPost.name" required class="form-input" /></label></div>
-        <div class="form-group"><label>Capitale: <input v-model="newPost.capital" required class="form-input" /></label></div>
-        <div class="form-group"><label>Population: <input type="number" v-model.number="newPost.population" required class="form-input" /></label></div>
-        <div class="form-group"><label>Superficie: <input type="number" v-model.number="newPost.area" required class="form-input" /></label></div>
-        <div class="form-group"><label>Monnaie: <input v-model="newPost.currency" required class="form-input" /></label></div>
-        <div class="form-group"><label>Langues (virgules): <input v-model="newPost.languages" required class="form-input" /></label></div>
-        <div class="form-group"><label>Région: <input v-model="newPost.region" required class="form-input" /></label></div>
-        <div class="form-group"><label>Sous-région: <input v-model="newPost.subregion" required class="form-input" /></label></div>
-        <div class="form-group"><label>Drapeau (URL): <input v-model="newPost.flag" required class="form-input" /></label></div>
+      <form @submit.prevent="methods.createCountry" class="form-container">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Nom</label>
+            <input v-model="state.newCountry.name" required class="form-input" />
+          </div>
+          <div class="form-group">
+            <label>Capitale</label>
+            <input v-model="state.newCountry.capital" required class="form-input" />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Population</label>
+            <input type="number" v-model.number="state.newCountry.population" required class="form-input" />
+          </div>
+          <div class="form-group">
+            <label>Superficie</label>
+            <input type="number" v-model.number="state.newCountry.area" required class="form-input" />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Monnaie</label>
+            <input v-model="state.newCountry.currency" required class="form-input" />
+          </div>
+          <div class="form-group">
+            <label>Langues</label>
+            <input v-model="state.newCountry.languages" placeholder="Langues séparées par des virgules" required class="form-input" />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Région</label>
+            <input v-model="state.newCountry.region" required class="form-input" />
+          </div>
+          <div class="form-group">
+            <label>Sous-région</label>
+            <input v-model="state.newCountry.subregion" required class="form-input" />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>Drapeau (URL)</label>
+          <input v-model="state.newCountry.flag" required class="form-input" />
+        </div>
+
         <div class="form-actions">
           <button type="submit" class="submit-button">Ajouter</button>
         </div>
@@ -452,16 +487,27 @@ h1, h2 {
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
-.country-flag {
-  width: 100px;
-  height: auto;
+.country-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   margin-bottom: 10px;
 }
 
-.actions {
+.country-flag {
+  width: 60px;
+  height: auto;
+  border: 1px solid #eee;
+}
+
+.country-details {
+  margin-bottom: 15px;
+}
+
+.country-actions {
   display: flex;
   gap: 10px;
-  margin-top: 10px;
+  margin-bottom: 15px;
 }
 
 .edit-button, .delete-button {
@@ -469,6 +515,7 @@ h1, h2 {
   border: none;
   border-radius: 4px;
   cursor: pointer;
+  font-size: 0.8em;
 }
 
 .edit-button {
@@ -489,18 +536,35 @@ h1, h2 {
   background-color: #c0392b;
 }
 
-.form-section {
-  margin-bottom: 20px;
-  border: 1px solid #ddd;
-  border-radius: 8px;
+.edit-form {
+  margin-top: 15px;
   padding: 15px;
   background-color: #f9f9f9;
+  border-radius: 4px;
+  border: 1px solid #ddd;
+}
+
+.form-section {
+  margin-bottom: 20px;
+  padding: 15px;
+  background-color: #f9f9f9;
+  border-radius: 8px;
+  border: 1px solid #ddd;
 }
 
 .form-container {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 15px;
+}
+
+.form-row {
+  display: flex;
+  gap: 15px;
+}
+
+.form-row .form-group {
+  flex: 1;
 }
 
 .form-group {
@@ -508,10 +572,17 @@ h1, h2 {
   flex-direction: column;
 }
 
+.form-group label {
+  margin-bottom: 5px;
+  font-weight: bold;
+  font-size: 0.9em;
+}
+
 .form-input {
   padding: 8px;
   border: 1px solid #ddd;
   border-radius: 4px;
+  font-size: 0.9em;
 }
 
 .form-actions {
@@ -525,6 +596,7 @@ h1, h2 {
   border: none;
   border-radius: 4px;
   cursor: pointer;
+  font-size: 0.9em;
 }
 
 .submit-button {
@@ -543,5 +615,16 @@ h1, h2 {
 
 .cancel-button:hover {
   background-color: #c0392b;
+}
+
+@media (max-width: 768px) {
+  .form-row {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .form-row .form-group {
+    flex: none;
+  }
 }
 </style>
