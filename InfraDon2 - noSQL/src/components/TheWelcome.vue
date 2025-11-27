@@ -1,45 +1,36 @@
 <script setup>
-// Importations
-import { onMounted, ref } from 'vue';
+import { onMounted, ref, computed } from 'vue';
 import PouchDB from 'pouchdb';
 import PouchDBFind from 'pouchdb-find';
 PouchDB.plugin(PouchDBFind);
-
-// Interfaces
-const countryProps = {
-  _id: String,
-  _rev: { type: String, default: null },
-  name: String,
-  capital: String,
-  population: Number,
-  area: Number,
-  currency: String,
-  languages: [String, Array],
-  region: String,
-  subregion: String,
-  flag: String
-};
 
 // État réactif
 const state = ref({
   localDB: null,
   remoteDB: null,
   countries: [],
-  newCountry: {
-    name: '',
-    capital: '',
-    population: 0,
-    area: 0,
-    currency: '',
-    languages: '',
-    region: '',
-    subregion: '',
-    flag: 'https://flagcdn.com/160x120/fr.png'
+  messages: [],
+  comments: [],
+  newMessage: {
+    title: '',
+    content: '',
+    countryId: '',
+    likes: 0
   },
-  editingCountryId: null,
-  searchRegion: '',
+  newComment: {
+    messageId: '',
+    content: '',
+    author: ''
+  },
+  editingMessageId: null,
+  editingCommentId: null,
+  searchTerm: '',
+  sortBy: 'date',
+  showAllComments: false,
+  selectedMessageId: null,
   isOnline: true,
-  syncHandler: null
+  syncHandler: null,
+  isLoading: true
 });
 
 // Méthodes
@@ -57,7 +48,7 @@ const methods = {
       live: true,
       retry: true,
     })
-    .on('change', methods.fetchData)
+    .on('change', methods.fetchAllData)
     .on('denied', methods.handleSyncError)
     .on('error', methods.handleSyncError);
   },
@@ -75,21 +66,398 @@ const methods = {
     }
   },
 
-  async fetchData() {
-    if (!state.value.localDB) return;
-
+  async fetchAllData() {
     try {
-      const result = await state.value.localDB.allDocs({ include_docs: true });
-      state.value.countries = result.rows
-        .map(row => row.doc)
-        .filter(doc => doc && !doc._id.startsWith('_'));
-    } catch (error) {
-      console.error('Erreur lors de la récupération des données:', error);
+      state.value.isLoading = true;
+      await methods.fetchCountries();
+      await methods.fetchMessages();
+      await methods.fetchComments();
+    } finally {
+      state.value.isLoading = false;
     }
   },
 
+  async fetchCountries() {
+    if (!state.value.localDB) return;
+    try {
+      // Utilisation de allDocs pour les pays (pas besoin d'index spécifique)
+      const result = await state.value.localDB.allDocs({
+        include_docs: true,
+        startkey: 'country_',
+        endkey: 'country_\uffff'
+      });
+      state.value.countries = result.rows.map(row => row.doc).filter(doc => doc);
+    } catch (error) {
+      console.error('Erreur lors de la récupération des pays:', error);
+      state.value.countries = [];
+    }
+  },
+
+  async fetchMessages() {
+    if (!state.value.localDB) return;
+    try {
+      // Utilisation de allDocs pour les messages (tri simple)
+      const result = await state.value.localDB.allDocs({
+        include_docs: true,
+        startkey: 'message_',
+        endkey: 'message_\uffff'
+      });
+      state.value.messages = result.rows.map(row => row.doc).filter(doc => doc);
+    } catch (error) {
+      console.error('Erreur lors de la récupération des messages:', error);
+      state.value.messages = [];
+    }
+  },
+
+  async fetchComments() {
+    if (!state.value.localDB) return;
+    try {
+      // Utilisation de allDocs pour les commentaires (tri simple)
+      const result = await state.value.localDB.allDocs({
+        include_docs: true,
+        startkey: 'comment_',
+        endkey: 'comment_\uffff'
+      });
+      state.value.comments = result.rows.map(row => row.doc).filter(doc => doc);
+    } catch (error) {
+      console.error('Erreur lors de la récupération des commentaires:', error);
+      state.value.comments = [];
+    }
+  },
+
+  async createIndex() {
+    if (!state.value.localDB) return;
+    try {
+      // Index pour les recherches par région
+      await state.value.localDB.createIndex({
+        index: { fields: ['type', 'region'] }
+      });
+
+      // Index pour les recherches par likes
+      await state.value.localDB.createIndex({
+        index: { fields: ['type', 'likes'] }
+      });
+
+      // Index pour les recherches par messageId
+      await state.value.localDB.createIndex({
+        index: { fields: ['type', 'messageId'] }
+      });
+
+      console.log('Index créés');
+    } catch (error) {
+      console.error('Erreur lors de la création des index:', error);
+    }
+  },
+
+  async createMessage(countryId) {
+    if (!state.value.localDB) return;
+
+    try {
+      const doc = {
+        _id: `message_${Date.now()}`,
+        type: 'message',
+        title: state.value.newMessage.title,
+        content: state.value.newMessage.content,
+        countryId: countryId,
+        likes: 0,
+        createdAt: new Date().toISOString()
+      };
+
+      await state.value.localDB.post(doc);
+      methods.resetNewMessageForm();
+      await methods.fetchMessages();
+    } catch (error) {
+      console.error('Erreur lors de la création du message:', error);
+    }
+  },
+
+  async updateMessage() {
+    if (!state.value.localDB || !state.value.editingMessageId) return;
+
+    try {
+      const doc = await methods.getDocument(state.value.editingMessageId);
+      if (!doc) return;
+
+      const updatedDoc = {
+        ...doc,
+        title: state.value.newMessage.title,
+        content: state.value.newMessage.content
+      };
+
+      await state.value.localDB.put(updatedDoc);
+      methods.resetNewMessageForm();
+      state.value.editingMessageId = null;
+      await methods.fetchMessages();
+    } catch (error) {
+      console.error('Erreur lors de la mise à jour du message:', error);
+    }
+  },
+
+  async deleteMessage(id) {
+    if (!state.value.localDB) return;
+
+    try {
+      const doc = await methods.getDocument(id);
+      if (!doc) return;
+
+      const associatedComments = state.value.comments.filter(c => c.messageId === id);
+      for (const comment of associatedComments) {
+        await methods.deleteDocument(comment._id);
+      }
+
+      await state.value.localDB.remove(doc);
+      await methods.fetchMessages();
+      await methods.fetchComments();
+    } catch (error) {
+      console.error('Erreur lors de la suppression du message:', error);
+    }
+  },
+
+  async createComment(messageId) {
+    if (!state.value.localDB) return;
+
+    try {
+      const doc = {
+        _id: `comment_${Date.now()}`,
+        type: 'comment',
+        messageId: messageId,
+        content: state.value.newComment.content,
+        author: state.value.newComment.author,
+        createdAt: new Date().toISOString()
+      };
+
+      await state.value.localDB.post(doc);
+      methods.resetNewCommentForm();
+      await methods.fetchComments();
+    } catch (error) {
+      console.error('Erreur lors de la création du commentaire:', error);
+    }
+  },
+
+  async updateComment() {
+    if (!state.value.localDB || !state.value.editingCommentId) return;
+
+    try {
+      const doc = await methods.getDocument(state.value.editingCommentId);
+      if (!doc) return;
+
+      const updatedDoc = {
+        ...doc,
+        content: state.value.newComment.content,
+        author: state.value.newComment.author
+      };
+
+      await state.value.localDB.put(updatedDoc);
+      methods.resetNewCommentForm();
+      state.value.editingCommentId = null;
+      await methods.fetchComments();
+    } catch (error) {
+      console.error('Erreur lors de la mise à jour du commentaire:', error);
+    }
+  },
+
+  async deleteComment(id) {
+    if (!state.value.localDB) return;
+
+    try {
+      const doc = await methods.getDocument(id);
+      if (!doc) return;
+
+      await state.value.localDB.remove(doc);
+      await methods.fetchComments();
+    } catch (error) {
+      console.error('Erreur lors de la suppression du commentaire:', error);
+    }
+  },
+
+  async likeMessage(id) {
+    if (!state.value.localDB) return;
+
+    try {
+      const doc = await methods.getDocument(id);
+      if (!doc) return;
+
+      const updatedDoc = {
+        ...doc,
+        likes: doc.likes + 1
+      };
+
+      await state.value.localDB.put(updatedDoc);
+      await methods.fetchMessages();
+    } catch (error) {
+      console.error('Erreur lors du like:', error);
+    }
+  },
+
+  async searchMessages() {
+    if (!state.value.localDB || !state.value.searchTerm) return;
+
+    try {
+      // Utilisation de find avec index pour la recherche
+      const result = await state.value.localDB.find({
+        selector: {
+          type: 'message',
+          $or: [
+            { title: { $regex: new RegExp(state.value.searchTerm, 'i') } },
+            { content: { $regex: new RegExp(state.value.searchTerm, 'i') } }
+          ]
+        },
+        sort: [{ createdAt: 'desc' }]
+      });
+      state.value.messages = result.docs;
+    } catch (error) {
+      console.error('Erreur lors de la recherche:', error);
+    }
+  },
+
+  async sortMessages() {
+    if (!state.value.localDB) return;
+
+    try {
+      // Utilisation de find avec index pour le tri
+      const result = await state.value.localDB.find({
+        selector: {
+          type: 'message'
+        },
+        sort: state.value.sortBy === 'likes' ?
+          [{ likes: 'desc' }] :
+          [{ createdAt: 'desc' }]
+      });
+      state.value.messages = result.docs;
+    } catch (error) {
+      console.error('Erreur lors du tri:', error);
+    }
+  },
+
+  async getTopLikedMessages() {
+    if (!state.value.localDB) return [];
+
+    try {
+      // Utilisation de find avec index pour les messages les plus likés
+      const result = await state.value.localDB.find({
+        selector: {
+          type: 'message'
+        },
+        sort: [{ likes: 'desc' }],
+        limit: 10
+      });
+      return result.docs || [];
+    } catch (error) {
+      console.error('Erreur lors de la récupération des messages les plus likés:', error);
+      return [];
+    }
+  },
+
+  async getCountriesByRegion(region) {
+    if (!state.value.localDB || !region) return [];
+
+    try {
+      // Utilisation de find avec index pour filtrer par région
+      const result = await state.value.localDB.find({
+        selector: {
+          type: 'country',
+          region: region
+        },
+        sort: [{ name: 'asc' }]
+      });
+      return result.docs;
+    } catch (error) {
+      console.error('Erreur lors de la récupération des pays par région:', error);
+      return [];
+    }
+  },
+
+  async getCommentsByMessageId(messageId) {
+    if (!state.value.localDB || !messageId) return [];
+
+    try {
+      // Utilisation de find avec index pour filtrer par messageId
+      const result = await state.value.localDB.find({
+        selector: {
+          type: 'comment',
+          messageId: messageId
+        },
+        sort: [{ createdAt: 'asc' }]
+      });
+      return result.docs;
+    } catch (error) {
+      console.error('Erreur lors de la récupération des commentaires par message:', error);
+      return [];
+    }
+  },
+
+  async getCountryById(id) {
+    if (!state.value.localDB || !id) return null;
+    try {
+      const doc = await state.value.localDB.get(id);
+      return doc.type === 'country' ? doc : null;
+    } catch (error) {
+      console.error('Erreur lors de la récupération du pays:', error);
+      return null;
+    }
+  },
+
+  async getMessageById(id) {
+    if (!state.value.localDB || !id) return null;
+    try {
+      const doc = await state.value.localDB.get(id);
+      return doc.type === 'message' ? doc : null;
+    } catch (error) {
+      console.error('Erreur lors de la récupération du message:', error);
+      return null;
+    }
+  },
+
+  startEditingMessage(message) {
+    if (!message) return;
+    state.value.newMessage = {
+      title: message.title || '',
+      content: message.content || '',
+      countryId: message.countryId || '',
+      likes: message.likes || 0
+    };
+    state.value.editingMessageId = message._id || null;
+  },
+
+  cancelEditingMessage() {
+    methods.resetNewMessageForm();
+    state.value.editingMessageId = null;
+  },
+
+  startEditingComment(comment) {
+    if (!comment) return;
+    state.value.newComment = {
+      messageId: comment.messageId || '',
+      content: comment.content || '',
+      author: comment.author || ''
+    };
+    state.value.editingCommentId = comment._id || null;
+  },
+
+  cancelEditingComment() {
+    methods.resetNewCommentForm();
+    state.value.editingCommentId = null;
+  },
+
+  resetNewMessageForm() {
+    state.value.newMessage = {
+      title: '',
+      content: '',
+      countryId: '',
+      likes: 0
+    };
+  },
+
+  resetNewCommentForm() {
+    state.value.newComment = {
+      messageId: '',
+      content: '',
+      author: ''
+    };
+  },
+
   async getDocument(id) {
-    if (!state.value.localDB) return null;
+    if (!state.value.localDB || !id) return null;
     try {
       return await state.value.localDB.get(id);
     } catch (error) {
@@ -98,113 +466,42 @@ const methods = {
     }
   },
 
-  async createCountry() {
-    if (!state.value.localDB) return;
-
-    try {
-      const doc = {
-        ...state.value.newCountry,
-        languages: state.value.newCountry.languages.split(',').map(lang => lang.trim()),
-        _id: `country_${Date.now()}`
-      };
-
-      await state.value.localDB.post(doc);
-      methods.resetNewCountryForm();
-      await methods.fetchData();
-    } catch (error) {
-      console.error('Erreur lors de la création:', error);
-    }
-  },
-
-  async updateCountry() {
-    if (!state.value.localDB || !state.value.editingCountryId) return;
-
-    try {
-      const doc = await methods.getDocument(state.value.editingCountryId);
-      if (!doc) return;
-
-      const updatedDoc = {
-        ...doc,
-        ...state.value.newCountry,
-        languages: state.value.newCountry.languages.split(',').map(lang => lang.trim())
-      };
-
-      await state.value.localDB.put(updatedDoc);
-      methods.resetNewCountryForm();
-      state.value.editingCountryId = null;
-      await methods.fetchData();
-    } catch (error) {
-      console.error('Erreur lors de la mise à jour:', error);
-    }
-  },
-
-  async deleteCountry(id) {
-    if (!state.value.localDB) return;
-
+  async deleteDocument(id) {
+    if (!state.value.localDB || !id) return;
     try {
       const doc = await methods.getDocument(id);
       if (!doc) return;
-
       await state.value.localDB.remove(doc);
-      await methods.fetchData();
     } catch (error) {
-      console.error('Erreur lors de la suppression:', error);
+      console.error('Erreur lors de la suppression du document:', error);
     }
-  },
-
-  startEditing(country) {
-    state.value.newCountry = {
-      ...country,
-      languages: Array.isArray(country.languages) ? country.languages.join(', ') : country.languages
-    };
-    state.value.editingCountryId = country._id;
-  },
-
-  cancelEditing() {
-    methods.resetNewCountryForm();
-    state.value.editingCountryId = null;
-  },
-
-  resetNewCountryForm() {
-    state.value.newCountry = {
-      name: '',
-      capital: '',
-      population: 0,
-      area: 0,
-      currency: '',
-      languages: '',
-      region: '',
-      subregion: '',
-      flag: 'https://flagcdn.com/160x120/fr.png'
-    };
   },
 
   handleSyncError(error) {
     console.error('Erreur de synchronisation:', error);
-  },
-
-  async createIndex() {
-    if (!state.value.localDB) return;
-    try {
-      await state.value.localDB.createIndex({ index: { fields: ['region'] } });
-      console.log('Index créé sur "region"');
-    } catch (error) {
-      console.error('Erreur lors de la création de l\'index:', error);
-    }
-  },
-
-  async searchByRegion() {
-    if (!state.value.localDB || !state.value.searchRegion) return;
-
-    try {
-      const result = await state.value.localDB.find({
-        selector: { region: { $eq: state.value.searchRegion } }
-      });
-      state.value.countries = result.docs;
-    } catch (error) {
-      console.error('Erreur lors de la recherche:', error);
-    }
   }
+};
+
+// Données calculées
+const computedData = {
+  topLikedMessages: computed(async () => {
+    return await methods.getTopLikedMessages();
+  }),
+
+  messagesWithComments: computed(() => {
+    return state.value.messages.map(message => {
+      if (!message || !message._id) return null;
+      return {
+        ...message,
+        country: methods.getCountryById(message.countryId)
+      };
+    }).filter(msg => msg !== null);
+  }),
+
+  filteredComments: computed(() => {
+    if (!state.value.selectedMessageId) return [];
+    return state.value.comments.filter(c => c && c.messageId === state.value.selectedMessageId);
+  })
 };
 
 // Cycle de vie
@@ -212,197 +509,203 @@ onMounted(() => {
   methods.initDatabases();
   if (state.value.isOnline) methods.syncDatabases();
   methods.createIndex();
-  methods.fetchData();
+  methods.fetchAllData();
 });
 </script>
 
 <template>
   <div class="app-container">
-    <h1>Gestion des Pays</h1>
+    <h1>Gestion des Pays et Messages</h1>
 
-    <!-- Toggle Online/Offline -->
-    <section class="toggle-section">
-      <button @click="methods.toggleOnlineOffline" class="toggle-button">
-        {{ state.isOnline ? 'Passer en mode OFFLINE' : 'Passer en mode ONLINE' }}
-      </button>
-      <span class="status">Statut : {{ state.isOnline ? 'ONLINE' : 'OFFLINE' }}</span>
-    </section>
+    <!-- Message de chargement -->
+    <div v-if="state.isLoading" class="loading-message">
+      Chargement des données...
+    </div>
 
-    <!-- Recherche par région -->
-    <section class="search-section">
-      <h2>Rechercher par région</h2>
-      <div class="search-container">
-        <input
-          v-model="state.searchRegion"
-          placeholder="Ex: Europe"
-          @keyup.enter="methods.searchByRegion"
-          class="search-input"
-        />
-        <button @click="methods.searchByRegion" class="search-button">Rechercher</button>
-        <button @click="methods.fetchData" class="reset-button">Réinitialiser</button>
-      </div>
-    </section>
+    <div v-else>
+      <!-- Toggle Online/Offline -->
+      <section class="toggle-section">
+        <button @click="methods.toggleOnlineOffline" class="toggle-button">
+          {{ state.isOnline ? 'Passer en mode OFFLINE' : 'Passer en mode ONLINE' }}
+        </button>
+        <span class="status">Statut : {{ state.isOnline ? 'ONLINE' : 'OFFLINE' }}</span>
+      </section>
 
-    <!-- Liste des pays -->
-    <section class="countries-section">
-      <div v-for="country in state.countries" :key="country._id" class="country-card">
-        <div class="country-header">
-          <h2>{{ country.name }}</h2>
-          <img :src="country.flag" alt="flag" class="country-flag" />
+      <!-- Recherche et tri des messages -->
+      <section class="message-controls">
+        <div class="search-container">
+          <input
+            v-model="state.searchTerm"
+            placeholder="Rechercher un message..."
+            @keyup.enter="methods.searchMessages"
+            class="search-input"
+          />
+          <button @click="methods.searchMessages" class="search-button">Rechercher</button>
+          <button @click="methods.fetchMessages" class="reset-button">Réinitialiser</button>
         </div>
 
-        <div class="country-details">
-          <p><strong>Capitale:</strong> {{ country.capital }}</p>
-          <p><strong>Population:</strong> {{ country.population.toLocaleString() }}</p>
-          <p><strong>Région:</strong> {{ country.region }} ({{ country.subregion }})</p>
-          <p><strong>Monnaie:</strong> {{ country.currency }}</p>
-          <p><strong>Langues:</strong>
-            {{
-              Array.isArray(country.languages)
-                ? country.languages.join(', ')
-                : country.languages
-            }}
-          </p>
+        <div class="sort-container">
+          <label>Trier par :</label>
+          <select v-model="state.sortBy" @change="methods.sortMessages" class="sort-select">
+            <option value="date">Date (le plus récent)</option>
+            <option value="likes">Nombre de likes</option>
+          </select>
         </div>
+      </section>
 
-        <div class="country-actions">
-          <button @click="methods.startEditing(country)" class="edit-button">
-            {{ state.editingCountryId === country._id ? 'Annuler' : 'Modifier' }}
-          </button>
-          <button @click="methods.deleteCountry(country._id)" class="delete-button">Supprimer</button>
+      <!-- Liste des pays -->
+      <section class="countries-section">
+        <h2>Pays</h2>
+        <div v-if="state.countries.length === 0" class="no-data">
+          Aucun pays trouvé.
         </div>
-
-        <!-- Formulaire de modification intégré -->
-        <div v-if="state.editingCountryId === country._id" class="edit-form">
-          <form @submit.prevent="methods.updateCountry" class="form-container">
-            <div class="form-row">
-              <div class="form-group">
-                <label>Nom</label>
-                <input v-model="state.newCountry.name" required class="form-input" />
-              </div>
-              <div class="form-group">
-                <label>Capitale</label>
-                <input v-model="state.newCountry.capital" required class="form-input" />
-              </div>
+        <div v-else class="country-grid">
+          <div v-for="country in state.countries" :key="country._id" class="country-card">
+            <div v-if="country && country._id" class="country-header">
+              <h3>{{ country.name }}</h3>
+              <img :src="country.flag" alt="flag" class="country-flag" />
             </div>
 
-            <div class="form-row">
-              <div class="form-group">
-                <label>Population</label>
-                <input type="number" v-model.number="state.newCountry.population" required class="form-input" />
-              </div>
-              <div class="form-group">
-                <label>Superficie</label>
-                <input type="number" v-model.number="state.newCountry.area" required class="form-input" />
-              </div>
+            <div class="country-details">
+              <p><strong>Capitale:</strong> {{ country.capital }}</p>
+              <p><strong>Population:</strong> {{ country.population?.toLocaleString() }}</p>
+              <p><strong>Région:</strong> {{ country.region }}</p>
             </div>
 
-            <div class="form-row">
-              <div class="form-group">
-                <label>Monnaie</label>
-                <input v-model="state.newCountry.currency" required class="form-input" />
-              </div>
-              <div class="form-group">
-                <label>Langues</label>
-                <input v-model="state.newCountry.languages" placeholder="Langues séparées par des virgules" required class="form-input" />
-              </div>
+            <!-- Formulaire pour ajouter un message -->
+            <div class="message-form">
+              <h4>Ajouter un message</h4>
+              <form @submit.prevent="methods.createMessage(country._id)" class="form-container">
+                <input
+                  v-model="state.newMessage.title"
+                  placeholder="Titre"
+                  required
+                  class="form-input"
+                />
+                <textarea
+                  v-model="state.newMessage.content"
+                  placeholder="Contenu"
+                  required
+                  class="form-input"
+                ></textarea>
+                <button type="submit" class="submit-button">Ajouter</button>
+              </form>
             </div>
 
-            <div class="form-row">
-              <div class="form-group">
-                <label>Région</label>
-                <input v-model="state.newCountry.region" required class="form-input" />
+            <!-- Messages associés au pays -->
+            <div class="messages-list">
+              <h4>Messages</h4>
+              <div v-if="state.messages.filter(m => m.countryId === country._id).length === 0">
+                Aucun message pour ce pays.
               </div>
-              <div class="form-group">
-                <label>Sous-région</label>
-                <input v-model="state.newCountry.subregion" required class="form-input" />
+              <div
+                v-for="message in state.messages.filter(m => m.countryId === country._id)"
+                :key="message._id"
+                class="message-card"
+              >
+                <div v-if="message && message._id" class="message-header">
+                  <h5>{{ message.title }}</h5>
+                  <div class="message-actions">
+                    <button @click="methods.likeMessage(message._id)" class="like-button">
+                      👍 {{ message.likes }}
+                    </button>
+                    <button
+                      @click="state.selectedMessageId = message._id"
+                      class="show-comments-button"
+                    >
+                      {{ state.selectedMessageId === message._id ? 'Masquer' : 'Voir' }} commentaires
+                    </button>
+                  </div>
+                </div>
+
+                <p>{{ message.content }}</p>
+
+                <!-- Tous les commentaires si sélectionnés -->
+                <div v-if="state.selectedMessageId === message._id" class="comments-list">
+                  <h6>Commentaires</h6>
+                  <div v-if="state.comments.filter(c => c.messageId === message._id).length === 0">
+                    Aucun commentaire pour ce message.
+                  </div>
+                  <div v-else>
+                    <div v-for="comment in state.comments.filter(c => c.messageId === message._id)" :key="comment._id" class="comment">
+                      <div v-if="comment && comment._id">
+                        <p>{{ comment.content }}</p>
+                        <p><em>Par {{ comment.author }}</em></p>
+                        <div class="comment-actions">
+                          <button @click="methods.startEditingComment(comment)" class="edit-button">Modifier</button>
+                          <button @click="methods.deleteComment(comment._id)" class="delete-button">Supprimer</button>
+                        </div>
+
+                        <!-- Formulaire de modification de commentaire -->
+                        <div v-if="state.editingCommentId === comment._id" class="edit-comment-form">
+                          <form @submit.prevent="methods.updateComment" class="form-container">
+                            <textarea v-model="state.newComment.content" required class="form-input"></textarea>
+                            <input v-model="state.newComment.author" placeholder="Auteur" required class="form-input" />
+                            <button type="submit" class="submit-button">Enregistrer</button>
+                            <button type="button" @click="methods.cancelEditingComment" class="cancel-button">Annuler</button>
+                          </form>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Formulaire pour ajouter un commentaire -->
+                    <form @submit.prevent="methods.createComment(message._id)" class="form-container">
+                      <textarea
+                        v-model="state.newComment.content"
+                        placeholder="Ajouter un commentaire"
+                        required
+                        class="form-input"
+                      ></textarea>
+                      <input
+                        v-model="state.newComment.author"
+                        placeholder="Votre nom"
+                        required
+                        class="form-input"
+                      />
+                      <button type="submit" class="submit-button">Commenter</button>
+                    </form>
+                  </div>
+                </div>
               </div>
             </div>
+          </div>
+        </div>
+      </section>
 
-            <div class="form-group">
-              <label>Drapeau (URL)</label>
-              <input v-model="state.newCountry.flag" required class="form-input" />
+      <!-- Messages les plus likés -->
+      <section class="top-messages-section">
+        <h2>Top 10 Messages les plus likés</h2>
+        <div v-if="computedData.topLikedMessages.length === 0" class="no-data">
+          Aucun message populaire trouvé.
+        </div>
+        <div v-else class="message-grid">
+          <div v-for="message in computedData.topLikedMessages" :key="message._id" class="message-card popular-message">
+            <div v-if="message && message._id">
+              <h3>{{ message.title }}</h3>
+              <p>{{ truncateText(message.content, 100) }}</p>
+              <div class="message-meta">
+                <span class="likes-count">❤️ {{ message.likes }}</span>
+                <span class="country-name" v-if="message.country">
+                  Pays: {{ message.country.name }}
+                </span>
+              </div>
             </div>
-
-            <div class="form-actions">
-              <button type="submit" class="submit-button">Enregistrer</button>
-              <button type="button" @click="methods.cancelEditing" class="cancel-button">Annuler</button>
-            </div>
-          </form>
-        </div>
-      </div>
-    </section>
-
-    <!-- Formulaire d'ajout -->
-    <section class="form-section">
-      <h2>Ajouter un pays</h2>
-      <form @submit.prevent="methods.createCountry" class="form-container">
-        <div class="form-row">
-          <div class="form-group">
-            <label>Nom</label>
-            <input v-model="state.newCountry.name" required class="form-input" />
-          </div>
-          <div class="form-group">
-            <label>Capitale</label>
-            <input v-model="state.newCountry.capital" required class="form-input" />
           </div>
         </div>
-
-        <div class="form-row">
-          <div class="form-group">
-            <label>Population</label>
-            <input type="number" v-model.number="state.newCountry.population" required class="form-input" />
-          </div>
-          <div class="form-group">
-            <label>Superficie</label>
-            <input type="number" v-model.number="state.newCountry.area" required class="form-input" />
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group">
-            <label>Monnaie</label>
-            <input v-model="state.newCountry.currency" required class="form-input" />
-          </div>
-          <div class="form-group">
-            <label>Langues</label>
-            <input v-model="state.newCountry.languages" placeholder="Langues séparées par des virgules" required class="form-input" />
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group">
-            <label>Région</label>
-            <input v-model="state.newCountry.region" required class="form-input" />
-          </div>
-          <div class="form-group">
-            <label>Sous-région</label>
-            <input v-model="state.newCountry.subregion" required class="form-input" />
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label>Drapeau (URL)</label>
-          <input v-model="state.newCountry.flag" required class="form-input" />
-        </div>
-
-        <div class="form-actions">
-          <button type="submit" class="submit-button">Ajouter</button>
-        </div>
-      </form>
-    </section>
+      </section>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .app-container {
-  max-width: 1200px;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 20px;
   font-family: 'Arial', sans-serif;
 }
 
-h1, h2 {
+h1, h2, h3, h4, h5, h6 {
   color: #2c3e50;
 }
 
@@ -430,21 +733,23 @@ h1, h2 {
   font-weight: bold;
 }
 
-.search-section {
+.message-controls {
   margin-bottom: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
 }
 
 .search-container {
   display: flex;
   gap: 10px;
-  margin-bottom: 10px;
 }
 
 .search-input {
   padding: 8px;
   border: 1px solid #ddd;
   border-radius: 4px;
-  flex: 1;
 }
 
 .search-button, .reset-button {
@@ -472,11 +777,26 @@ h1, h2 {
   background-color: #c0392b;
 }
 
+.sort-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sort-select {
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
 .countries-section {
+  margin-bottom: 40px;
+}
+
+.country-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
   gap: 20px;
-  margin-bottom: 20px;
 }
 
 .country-card {
@@ -500,131 +820,138 @@ h1, h2 {
   border: 1px solid #eee;
 }
 
-.country-details {
-  margin-bottom: 15px;
-}
-
-.country-actions {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 15px;
-}
-
-.edit-button, .delete-button {
-  padding: 5px 10px;
-  border: none;
+.message-form {
+  margin: 15px 0;
+  padding: 10px;
+  background-color: #f9f9f9;
   border-radius: 4px;
-  cursor: pointer;
-  font-size: 0.8em;
 }
 
-.edit-button {
-  background-color: #f39c12;
-  color: white;
+.message-form h4 {
+  margin-bottom: 10px;
 }
 
-.edit-button:hover {
-  background-color: #e67e22;
-}
-
-.delete-button {
-  background-color: #e74c3c;
-  color: white;
-}
-
-.delete-button:hover {
-  background-color: #c0392b;
-}
-
-.edit-form {
+.messages-list {
   margin-top: 15px;
-  padding: 15px;
-  background-color: #f9f9f9;
+}
+
+.message-card {
+  border: 1px solid #eee;
   border-radius: 4px;
-  border: 1px solid #ddd;
+  padding: 10px;
+  margin-bottom: 10px;
 }
 
-.form-section {
-  margin-bottom: 20px;
-  padding: 15px;
-  background-color: #f9f9f9;
-  border-radius: 8px;
-  border: 1px solid #ddd;
-}
-
-.form-container {
+.message-header {
   display: flex;
-  flex-direction: column;
-  gap: 15px;
-}
-
-.form-row {
-  display: flex;
-  gap: 15px;
-}
-
-.form-row .form-group {
-  flex: 1;
-}
-
-.form-group {
-  display: flex;
-  flex-direction: column;
-}
-
-.form-group label {
+  justify-content: space-between;
+  align-items: center;
   margin-bottom: 5px;
-  font-weight: bold;
-  font-size: 0.9em;
 }
 
-.form-input {
-  padding: 8px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-  font-size: 0.9em;
-}
-
-.form-actions {
+.message-actions {
   display: flex;
   gap: 10px;
-  margin-top: 10px;
 }
 
-.submit-button, .cancel-button {
-  padding: 8px 16px;
+.like-button {
+  background: none;
   border: none;
-  border-radius: 4px;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.first-comment {
+  margin-top: 10px;
+  padding: 10px;
+  background-color: #f5f5f5;
+  border-radius: 4px;
   font-size: 0.9em;
 }
 
-.submit-button {
-  background-color: #2ecc71;
-  color: white;
+.comments-list {
+  margin-top: 15px;
+  border-left: 2px solid #ddd;
+  padding-left: 15px;
 }
 
-.submit-button:hover {
-  background-color: #27ae60;
+.comment {
+  margin-bottom: 10px;
+  padding: 10px;
+  background-color: #f9f9f9;
+  border-radius: 4px;
 }
 
-.cancel-button {
-  background-color: #e74c3c;
-  color: white;
+.comment-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 5px;
 }
 
-.cancel-button:hover {
-  background-color: #c0392b;
+.edit-comment-form {
+  margin-top: 10px;
+  padding: 10px;
+  background-color: white;
+  border-radius: 4px;
+  border: 1px solid #ddd;
+}
+
+.top-messages-section {
+  margin-top: 40px;
+}
+
+.message-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 20px;
+}
+
+.popular-message {
+  background-color: #f0f8ff;
+  border-left: 4px solid #3498db;
+}
+
+.message-meta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  font-size: 0.9em;
+  color: #666;
+}
+
+.likes-count {
+  color: #e74c3c;
+  font-weight: bold;
+}
+
+.loading-message {
+  padding: 20px;
+  text-align: center;
+  font-size: 1.2em;
+  color: #666;
+}
+
+.no-data {
+  padding: 20px;
+  text-align: center;
+  color: #999;
+  font-style: italic;
 }
 
 @media (max-width: 768px) {
-  .form-row {
-    flex-direction: column;
-    gap: 10px;
+  .country-grid {
+    grid-template-columns: 1fr;
   }
 
-  .form-row .form-group {
-    flex: none;
+  .message-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .sort-container {
+    margin-top: 10px;
   }
 }
 </style>
