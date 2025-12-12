@@ -27,6 +27,7 @@ const state = ref({
   messages: [],
   comments: [],
   allCommentsForMessage: {},
+  topLikedMessages: [],  // Stockage des top 10 messages
   
   selectedCountryId: null,
   expandedMessageId: null,
@@ -112,6 +113,10 @@ const methods = {
       await state.value.localDB.createIndex({
         index: { fields: ['type', 'messageId', 'createdAt'] }
       });
+      // Index pour le top 10 des messages les plus likés (tous pays)
+      await state.value.localDB.createIndex({
+        index: { fields: ['type', 'likes'] }
+      });
       console.log('✅ Index créés');
     } catch (error) {
       console.error('❌ Erreur index:', error);
@@ -158,9 +163,27 @@ const methods = {
 
   async fetchAllData() {
     await methods.fetchCountries();
+    await methods.fetchTopLikedMessages(); // Récupérer le top 10
     if (state.value.selectedCountryId) {
       await methods.fetchMessages();
       await methods.fetchComments();
+    }
+  },
+
+  async fetchTopLikedMessages() {
+    if (!state.value.localDB) return;
+    try {
+      const result = await state.value.localDB.find({
+        selector: {
+          type: DB_CONFIG.docTypes.message
+        },
+        sort: [{ type: 'asc' }, { likes: 'desc' }],
+        limit: 10
+      });
+      state.value.topLikedMessages = result.docs || [];
+    } catch (error) {
+      console.error('❌ Erreur fetchTopLikedMessages:', error);
+      state.value.topLikedMessages = [];
     }
   },
 
@@ -222,7 +245,7 @@ const methods = {
             type: DB_CONFIG.docTypes.comment,
             messageId: message._id
           },
-          sort: [{ type: 'asc' }, { createdAt: 'asc' }],
+          sort: [{ type: 'asc' }, { messageId: 'asc' }, { createdAt: 'asc' }],
           limit: 1
         });
         if (result.docs && result.docs.length > 0) {
@@ -244,7 +267,7 @@ const methods = {
           type: DB_CONFIG.docTypes.comment,
           messageId: messageId
         },
-        sort: [{ type: 'asc' }, { createdAt: 'asc' }]
+        sort: [{ type: 'asc' }, { messageId: 'asc' }, { createdAt: 'asc' }]
       });
       state.value.allCommentsForMessage[messageId] = result.docs || [];
     } catch (error) {
@@ -371,6 +394,7 @@ const methods = {
       await state.value.localDB.put(doc);
       methods.resetMessageForm();
       await methods.fetchMessages();
+      await methods.fetchTopLikedMessages(); // Rafraîchir le top 10
       console.log('✅ Message créé');
     } catch (error) {
       console.error('❌ Erreur création message:', error);
@@ -412,6 +436,7 @@ const methods = {
       
       await methods.fetchMessages();
       await methods.fetchComments();
+      await methods.fetchTopLikedMessages(); // Rafraîchir le top 10
       console.log('✅ Message supprimé');
     } catch (error) {
       console.error('❌ Erreur delete message:', error);
@@ -431,6 +456,7 @@ const methods = {
       }
       await state.value.localDB.put(doc);
       await methods.fetchMessages();
+      await methods.fetchTopLikedMessages(); // Rafraîchir le top 10
       console.log('✅ Like mis à jour');
     } catch (error) {
       console.error('❌ Erreur like:', error);
@@ -643,11 +669,6 @@ const methods = {
 };
 
 const computedData = computed(() => {
-  const allMessages = [...state.value.messages];
-  const topLikedMessages = allMessages
-    .sort((a, b) => (b.likes || 0) - (a.likes || 0))
-    .slice(0, 10);
-
   const firstCommentByMessage = {};
   state.value.comments.forEach(comment => {
     if (!firstCommentByMessage[comment.messageId]) {
@@ -655,7 +676,11 @@ const computedData = computed(() => {
     }
   });
 
-  return { topLikedMessages, firstCommentByMessage };
+  // Utiliser directement les données récupérées depuis la base de données
+  return { 
+    topLikedMessages: state.value.topLikedMessages,
+    firstCommentByMessage 
+  };
 });
 
 watch(() => state.value.searchMessageTerm, () => {
