@@ -4,7 +4,9 @@ import PouchDB from 'pouchdb';
 import PouchDBFind from 'pouchdb-find';
 PouchDB.plugin(PouchDBFind);
 
-// Configuration des bases de données
+//If faut rajouter les commentaires justtificatifs + renommer collection selon photo prise
+
+// Configuration de la base de données
 const DB_CONFIG = {
   local: 'local_app_db',
   remote: 'http://admin:admin@localhost:5984/firstdbinfradon2',
@@ -15,7 +17,7 @@ const DB_CONFIG = {
   }
 };
 
-// État réactif
+// État de l'application
 const state = ref({
   localDB: null,
   remoteDB: null,
@@ -27,10 +29,13 @@ const state = ref({
   messages: [],
   comments: [],
   allCommentsForMessage: {},
-  topLikedMessages: [],  // Stockage des top 10 messages
+  topLikedMessages: [],
   
   selectedCountryId: null,
   expandedMessageId: null,
+  topMessagesOffset: 0,
+  topMessagesLimit: 10,
+  hasMoreTopMessages: true,
   
   newCountry: {
     name: '',
@@ -48,10 +53,8 @@ const state = ref({
     content: ''
   },
   
-  // Formulaires de commentaires séparés par message
   commentForms: {},
   
-  // Édition
   editingCountryId: null,
   editingMessageId: null,
   editingCommentId: null,
@@ -61,10 +64,13 @@ const state = ref({
   searchMessageTerm: '',
   sortBy: 'date',
   
+  selectedFile: null,
+  uploadingAttachment: false,
+  attachmentUrls: {},
+  
   userLikedMessages: new Set()
 });
 
-// Initialiser le formulaire de commentaire pour un message
 const initCommentForm = (messageId) => {
   if (!state.value.commentForms[messageId]) {
     state.value.commentForms[messageId] = {
@@ -90,7 +96,7 @@ const methods = {
         methods.startContinuousSync();
       }
     } catch (error) {
-      console.error('❌ Erreur d\'initialisation:', error);
+      console.error('Erreur d\'initialisation:', error);
     } finally {
       state.value.isLoading = false;
     }
@@ -98,51 +104,64 @@ const methods = {
 
   async createIndexes() {
     try {
+      // Index pour rechercher les pays par région
       await state.value.localDB.createIndex({
         index: { fields: ['type', 'region'] }
       });
+      
+      // Index pour trier les messages d'un pays par nombre de likes
       await state.value.localDB.createIndex({
         index: { fields: ['type', 'countryId', 'likes'] }
       });
+      
+      // Index pour trier les messages d'un pays par date de création
       await state.value.localDB.createIndex({
         index: { fields: ['type', 'countryId', 'createdAt'] }
       });
+      
+      // Index pour rechercher des messages par titre dans un pays
       await state.value.localDB.createIndex({
         index: { fields: ['type', 'countryId', 'title'] }
       });
+      
+      // Index pour récupérer les commentaires d'un message triés par date
       await state.value.localDB.createIndex({
         index: { fields: ['type', 'messageId', 'createdAt'] }
       });
-      // Index pour le top 10 des messages les plus likés (tous pays)
+      
+      // Index pour obtenir le top N des messages tous pays confondus
       await state.value.localDB.createIndex({
         index: { fields: ['type', 'likes'] }
       });
-      console.log('✅ Index créés');
+      
+      console.log('Index créés avec succès');
     } catch (error) {
-      console.error('❌ Erreur index:', error);
+      console.error('Erreur lors de la création des index:', error);
     }
   },
 
   async replicateFromRemote() {
     try {
-      console.log('🔄 Réplication...');
+      console.log('Réplication initiale en cours...');
+      // Récupération des données du serveur distant vers la base locale
       await state.value.localDB.replicate.from(state.value.remoteDB);
-      console.log('✅ Réplication terminée');
+      console.log('Réplication terminée');
     } catch (error) {
-      console.error('❌ Erreur réplication:', error);
+      console.error('Erreur de réplication:', error);
     }
   },
 
   startContinuousSync() {
     if (!state.value.isOnline) return;
-    console.log('🔄 Sync continue...');
+    console.log('Synchronisation continue activée');
     
+    // Synchronisation bidirectionnelle en temps réel
     state.value.syncHandler = state.value.localDB.sync(state.value.remoteDB, {
       live: true,
       retry: true
     })
     .on('change', () => methods.fetchAllData())
-    .on('error', (err) => console.error('❌ Erreur sync:', err));
+    .on('error', (err) => console.error('Erreur de synchronisation:', err));
   },
 
   stopContinuousSync() {
@@ -163,33 +182,71 @@ const methods = {
 
   async fetchAllData() {
     await methods.fetchCountries();
-    await methods.fetchTopLikedMessages(); // Récupérer le top 10
+    await methods.fetchTopLikedMessages();
     if (state.value.selectedCountryId) {
       await methods.fetchMessages();
       await methods.fetchComments();
     }
   },
 
-  async fetchTopLikedMessages() {
+  // Récupération du top N des messages les plus likés
+  // Utilise limit et skip pour une pagination efficace
+  async fetchTopLikedMessages(loadMore = false) {
     if (!state.value.localDB) return;
+    
+    if (!loadMore) {
+      state.value.topMessagesOffset = 0;
+      state.value.topLikedMessages = [];
+    }
+    
     try {
+      // Requête avec tri décroissant sur les likes
+      // Le tri est effectué par la base de données grâce à l'index
       const result = await state.value.localDB.find({
         selector: {
           type: DB_CONFIG.docTypes.message
         },
         sort: [{ type: 'asc' }, { likes: 'desc' }],
-        limit: 10
+        limit: state.value.topMessagesLimit,
+        skip: state.value.topMessagesOffset
       });
-      state.value.topLikedMessages = result.docs || [];
+      
+      if (loadMore) {
+        state.value.topLikedMessages = [
+          ...state.value.topLikedMessages,
+          ...result.docs
+        ];
+      } else {
+        state.value.topLikedMessages = result.docs || [];
+      }
+      
+      // Charger les images pour chaque message
+      for (const message of result.docs) {
+        if (message._attachments) {
+          await methods.loadMessageAttachments(message._id);
+        }
+      }
+      
+      state.value.hasMoreTopMessages = result.docs.length === state.value.topMessagesLimit;
+      
+      if (loadMore) {
+        state.value.topMessagesOffset += state.value.topMessagesLimit;
+      }
     } catch (error) {
-      console.error('❌ Erreur fetchTopLikedMessages:', error);
+      console.error('Erreur lors de la récupération du top messages:', error);
       state.value.topLikedMessages = [];
     }
+  },
+
+  async loadMoreTopMessages() {
+    await methods.fetchTopLikedMessages(true);
   },
 
   async fetchCountries() {
     if (!state.value.localDB) return;
     try {
+      // Utilisation de allDocs avec plage de clés pour récupérer tous les pays
+      // Plus efficace que find() pour récupérer tous les documents d'un type
       const result = await state.value.localDB.allDocs({
         include_docs: true,
         startkey: `${DB_CONFIG.docTypes.country}_`,
@@ -197,7 +254,7 @@ const methods = {
       });
       state.value.countries = result.rows.map(row => row.doc).filter(doc => doc);
     } catch (error) {
-      console.error('❌ Erreur fetchCountries:', error);
+      console.error('Erreur lors de la récupération des pays:', error);
       state.value.countries = [];
     }
   },
@@ -208,6 +265,8 @@ const methods = {
       return;
     }
     try {
+      // Filtrage et tri des messages pour un pays spécifique
+      // L'index permet d'optimiser cette requête
       let selector = {
         type: DB_CONFIG.docTypes.message,
         countryId: state.value.selectedCountryId
@@ -223,15 +282,22 @@ const methods = {
       const result = await state.value.localDB.find({ selector, sort });
       state.value.messages = result.docs || [];
       
-      // Initialiser les formulaires de commentaires pour chaque message
-      state.value.messages.forEach(msg => initCommentForm(msg._id));
+      // Charger les attachments pour chaque message
+      for (const message of state.value.messages) {
+        if (message._attachments) {
+          await methods.loadMessageAttachments(message._id);
+        }
+      }
       
+      state.value.messages.forEach(msg => initCommentForm(msg._id));
     } catch (error) {
-      console.error('❌ Erreur fetchMessages:', error);
+      console.error('Erreur lors de la récupération des messages:', error);
       state.value.messages = [];
     }
   },
 
+  // Récupération du premier commentaire de chaque message
+  // Utilise limit: 1 pour ne charger que le commentaire le plus récent
   async fetchComments() {
     if (!state.value.localDB || !state.value.messages.length) {
       state.value.comments = [];
@@ -254,13 +320,19 @@ const methods = {
       }
       state.value.comments = comments;
     } catch (error) {
-      console.error('❌ Erreur fetchComments:', error);
+      console.error('Erreur lors de la récupération des commentaires:', error);
       state.value.comments = [];
     }
   },
 
+  // Chargement à la demande de tous les commentaires d'un message
   async fetchAllCommentsForMessage(messageId) {
     if (!state.value.localDB) return;
+    
+    if (state.value.allCommentsForMessage[messageId]) {
+      return;
+    }
+    
     try {
       const result = await state.value.localDB.find({
         selector: {
@@ -271,12 +343,11 @@ const methods = {
       });
       state.value.allCommentsForMessage[messageId] = result.docs || [];
     } catch (error) {
-      console.error('❌ Erreur fetchAllComments:', error);
+      console.error('Erreur lors de la récupération des commentaires:', error);
       state.value.allCommentsForMessage[messageId] = [];
     }
   },
 
-  // PAYS
   async createCountry() {
     if (!state.value.localDB) return;
     try {
@@ -292,9 +363,9 @@ const methods = {
       await state.value.localDB.put(doc);
       methods.resetCountryForm();
       await methods.fetchCountries();
-      console.log('✅ Pays créé');
+      console.log('Pays créé avec succès');
     } catch (error) {
-      console.error('❌ Erreur création pays:', error);
+      console.error('Erreur lors de la création du pays:', error);
     }
   },
 
@@ -313,9 +384,9 @@ const methods = {
       methods.resetCountryForm();
       state.value.editingCountryId = null;
       await methods.fetchCountries();
-      console.log('✅ Pays mis à jour');
+      console.log('Pays mis à jour');
     } catch (error) {
-      console.error('❌ Erreur update pays:', error);
+      console.error('Erreur lors de la mise à jour du pays:', error);
     }
   },
 
@@ -330,9 +401,9 @@ const methods = {
         state.value.comments = [];
       }
       await methods.fetchCountries();
-      console.log('✅ Pays supprimé');
+      console.log('Pays supprimé');
     } catch (error) {
-      console.error('❌ Erreur delete pays:', error);
+      console.error('Erreur lors de la suppression du pays:', error);
     }
   },
 
@@ -370,7 +441,6 @@ const methods = {
     };
   },
 
-  // MESSAGES
   selectCountry(countryId) {
     state.value.selectedCountryId = countryId;
     state.value.searchMessageTerm = '';
@@ -394,10 +464,10 @@ const methods = {
       await state.value.localDB.put(doc);
       methods.resetMessageForm();
       await methods.fetchMessages();
-      await methods.fetchTopLikedMessages(); // Rafraîchir le top 10
-      console.log('✅ Message créé');
+      await methods.fetchTopLikedMessages();
+      console.log('Message créé');
     } catch (error) {
-      console.error('❌ Erreur création message:', error);
+      console.error('Erreur lors de la création du message:', error);
     }
   },
 
@@ -412,9 +482,9 @@ const methods = {
       methods.resetMessageForm();
       state.value.editingMessageId = null;
       await methods.fetchMessages();
-      console.log('✅ Message mis à jour');
+      console.log('Message mis à jour');
     } catch (error) {
-      console.error('❌ Erreur update message:', error);
+      console.error('Erreur lors de la mise à jour du message:', error);
     }
   },
 
@@ -424,6 +494,7 @@ const methods = {
       const doc = await state.value.localDB.get(id);
       await state.value.localDB.remove(doc);
       
+      // Suppression en cascade des commentaires associés
       const commentsResult = await state.value.localDB.find({
         selector: { 
           type: DB_CONFIG.docTypes.comment,
@@ -436,10 +507,10 @@ const methods = {
       
       await methods.fetchMessages();
       await methods.fetchComments();
-      await methods.fetchTopLikedMessages(); // Rafraîchir le top 10
-      console.log('✅ Message supprimé');
+      await methods.fetchTopLikedMessages();
+      console.log('Message supprimé');
     } catch (error) {
-      console.error('❌ Erreur delete message:', error);
+      console.error('Erreur lors de la suppression du message:', error);
     }
   },
 
@@ -456,10 +527,10 @@ const methods = {
       }
       await state.value.localDB.put(doc);
       await methods.fetchMessages();
-      await methods.fetchTopLikedMessages(); // Rafraîchir le top 10
-      console.log('✅ Like mis à jour');
+      await methods.fetchTopLikedMessages();
+      console.log('Like mis à jour');
     } catch (error) {
-      console.error('❌ Erreur like:', error);
+      console.error('Erreur lors de la mise à jour du like:', error);
     }
   },
 
@@ -480,7 +551,6 @@ const methods = {
     state.value.newMessage = { title: '', content: '' };
   },
 
-  // COMMENTAIRES
   async createComment(messageId) {
     if (!state.value.localDB) return;
     
@@ -503,19 +573,17 @@ const methods = {
       };
       
       await state.value.localDB.put(doc);
-      
-      // Réinitialiser le formulaire
       state.value.commentForms[messageId] = { content: '', author: '' };
-      
       await methods.fetchComments();
       
       if (state.value.expandedMessageId === messageId) {
+        delete state.value.allCommentsForMessage[messageId];
         await methods.fetchAllCommentsForMessage(messageId);
       }
       
-      console.log('✅ Commentaire créé');
+      console.log('Commentaire créé');
     } catch (error) {
-      console.error('❌ Erreur création commentaire:', error);
+      console.error('Erreur lors de la création du commentaire:', error);
       alert('Erreur lors de la création du commentaire');
     }
   },
@@ -544,12 +612,13 @@ const methods = {
       await methods.fetchComments();
       
       if (state.value.expandedMessageId === doc.messageId) {
+        delete state.value.allCommentsForMessage[doc.messageId];
         await methods.fetchAllCommentsForMessage(doc.messageId);
       }
       
-      console.log('✅ Commentaire mis à jour');
+      console.log('Commentaire mis à jour');
     } catch (error) {
-      console.error('❌ Erreur update commentaire:', error);
+      console.error('Erreur lors de la mise à jour du commentaire:', error);
     }
   },
 
@@ -565,12 +634,13 @@ const methods = {
       await methods.fetchComments();
       
       if (state.value.expandedMessageId === comment.messageId) {
+        delete state.value.allCommentsForMessage[comment.messageId];
         await methods.fetchAllCommentsForMessage(comment.messageId);
       }
       
-      console.log('✅ Commentaire supprimé');
+      console.log('Commentaire supprimé');
     } catch (error) {
-      console.error('❌ Erreur delete commentaire:', error);
+      console.error('Erreur lors de la suppression du commentaire:', error);
     }
   },
 
@@ -609,20 +679,128 @@ const methods = {
         }
       });
       state.value.countries = result.docs;
-      console.log('✅ Recherche effectuée');
+      console.log('Recherche effectuée');
     } catch (error) {
-      console.error('❌ Erreur recherche:', error);
+      console.error('Erreur lors de la recherche:', error);
+    }
+  },
+
+  // Gestion des fichiers joints (attachments)
+  handleFileSelect(event, messageId) {
+    const file = event.target.files[0];
+    if (file) {
+      state.value.selectedFile = { file, messageId };
+    }
+  },
+
+  async uploadAttachment(messageId) {
+    if (!state.value.selectedFile || !state.value.localDB) return;
+    
+    const { file } = state.value.selectedFile;
+    
+    const maxSize = 5 * 1024 * 1024;
+    if (file.size > maxSize) {
+      alert('Le fichier est trop volumineux (max 5MB)');
+      return;
+    }
+    
+    try {
+      state.value.uploadingAttachment = true;
+      
+      const doc = await state.value.localDB.get(messageId);
+      
+      // Ajout du fichier comme attachment au document
+      await state.value.localDB.putAttachment(
+        messageId,
+        file.name,
+        doc._rev,
+        file,
+        file.type
+      );
+      
+      await methods.fetchMessages();
+      await methods.loadMessageAttachments(messageId);
+      
+      state.value.selectedFile = null;
+      state.value.uploadingAttachment = false;
+      
+      console.log('Fichier uploadé avec succès');
+      alert('Fichier ajouté avec succès !');
+    } catch (error) {
+      console.error('Erreur lors de l\'upload:', error);
+      state.value.uploadingAttachment = false;
+      alert('Erreur lors de l\'upload du fichier');
+    }
+  },
+
+  async deleteAttachment(messageId, attachmentName) {
+    if (!state.value.localDB) return;
+    
+    if (!confirm('Supprimer ce fichier ?')) return;
+    
+    try {
+      const doc = await state.value.localDB.get(messageId);
+      
+      await state.value.localDB.removeAttachment(
+        messageId,
+        attachmentName,
+        doc._rev
+      );
+      
+      // Nettoyer l'URL du cache
+      if (state.value.attachmentUrls[messageId]?.[attachmentName]) {
+        URL.revokeObjectURL(state.value.attachmentUrls[messageId][attachmentName]);
+        delete state.value.attachmentUrls[messageId][attachmentName];
+      }
+      
+      await methods.fetchMessages();
+      
+      console.log('Fichier supprimé');
+      alert('Fichier supprimé avec succès !');
+    } catch (error) {
+      console.error('Erreur lors de la suppression:', error);
+      alert('Erreur lors de la suppression du fichier');
+    }
+  },
+
+  // Chargement et conversion des attachments en URLs pour l'affichage
+  async loadMessageAttachments(messageId) {
+    if (!state.value.localDB) return;
+    
+    try {
+      const doc = await state.value.localDB.get(messageId, { attachments: true });
+      
+      if (!doc._attachments) return;
+      
+      if (!state.value.attachmentUrls[messageId]) {
+        state.value.attachmentUrls[messageId] = {};
+      }
+      
+      for (const attachmentName in doc._attachments) {
+        // Éviter de recharger si déjà en cache
+        if (state.value.attachmentUrls[messageId][attachmentName]) {
+          continue;
+        }
+        
+        const blob = await state.value.localDB.getAttachment(messageId, attachmentName);
+        const url = URL.createObjectURL(blob);
+        state.value.attachmentUrls[messageId][attachmentName] = url;
+      }
+    } catch (error) {
+      console.error('Erreur lors du chargement des attachments:', error);
     }
   },
 
   async generateTestData() {
     try {
-      console.log('🔧 Génération...');
+      console.log('Génération de données de test...');
       
       const testCountries = [
         { name: 'France', capital: 'Paris', population: 67000000, area: 551695, currency: 'EUR', languages: ['Français'], region: 'Europe', subregion: 'Western Europe', flag: 'https://flagcdn.com/160x120/fr.png' },
         { name: 'Germany', capital: 'Berlin', population: 83000000, area: 357022, currency: 'EUR', languages: ['Deutsch'], region: 'Europe', subregion: 'Western Europe', flag: 'https://flagcdn.com/160x120/de.png' },
-        { name: 'Italy', capital: 'Rome', population: 60000000, area: 301340, currency: 'EUR', languages: ['Italiano'], region: 'Europe', subregion: 'Southern Europe', flag: 'https://flagcdn.com/160x120/it.png' }
+        { name: 'Italy', capital: 'Rome', population: 60000000, area: 301340, currency: 'EUR', languages: ['Italiano'], region: 'Europe', subregion: 'Southern Europe', flag: 'https://flagcdn.com/160x120/it.png' },
+        { name: 'Spain', capital: 'Madrid', population: 47000000, area: 505990, currency: 'EUR', languages: ['Español'], region: 'Europe', subregion: 'Southern Europe', flag: 'https://flagcdn.com/160x120/es.png' },
+        { name: 'Suisse', capital: 'Berne', population: 8500000, area: 41290, currency: 'CHF', languages: ['Français', 'Deutsch', 'Italiano'], region: 'Europe', subregion: 'Western Europe', flag: 'https://flagcdn.com/160x120/ch.png' }
       ];
       
       for (const countryData of testCountries) {
@@ -640,7 +818,7 @@ const methods = {
             type: DB_CONFIG.docTypes.message,
             countryId: countryDoc._id,
             title: `Message ${i + 1} about ${countryData.name}`,
-            content: `Test message ${i + 1} about ${countryData.name}.`,
+            content: `This is test message number ${i + 1} about ${countryData.name}. Lorem ipsum dolor sit amet....`,
             likes: Math.floor(Math.random() * 50),
             createdAt: new Date(Date.now() - Math.random() * 10000000000).toISOString()
           };
@@ -651,7 +829,7 @@ const methods = {
               _id: `${DB_CONFIG.docTypes.comment}_${Date.now()}_${Math.random()}`,
               type: DB_CONFIG.docTypes.comment,
               messageId: messageDoc._id,
-              content: `Comment ${j + 1} on this message.`,
+              content: `Comment ${j + 1} on this message. This is a test comment.`,
               author: `User ${j + 1}`,
               createdAt: new Date(Date.now() - Math.random() * 10000000000).toISOString()
             };
@@ -661,9 +839,9 @@ const methods = {
       }
       
       await methods.fetchAllData();
-      console.log('✅ Données générées');
+      console.log('Données de test générées avec succès');
     } catch (error) {
-      console.error('❌ Erreur génération:', error);
+      console.error('Erreur lors de la génération:', error);
     }
   }
 };
@@ -676,7 +854,6 @@ const computedData = computed(() => {
     }
   });
 
-  // Utiliser directement les données récupérées depuis la base de données
   return { 
     topLikedMessages: state.value.topLikedMessages,
     firstCommentByMessage 
@@ -721,7 +898,7 @@ onMounted(() => {
         <div class="search-bar">
           <input
             v-model="state.searchRegion"
-            placeholder="Rechercher par région"
+            placeholder="Rechercher par région (ex: Europe)"
             @keyup.enter="methods.searchByRegion"
             class="input"
           />
@@ -746,7 +923,7 @@ onMounted(() => {
                 <input v-model.number="state.newCountry.population" type="number" required class="input" />
               </div>
               <div class="form-group">
-                <label>Superficie</label>
+                <label>Superficie (km²)</label>
                 <input v-model.number="state.newCountry.area" type="number" required class="input" />
               </div>
               <div class="form-group">
@@ -754,7 +931,7 @@ onMounted(() => {
                 <input v-model="state.newCountry.currency" required class="input" />
               </div>
               <div class="form-group">
-                <label>Langues</label>
+                <label>Langues (séparées par virgules)</label>
                 <input v-model="state.newCountry.languages" required class="input" />
               </div>
               <div class="form-group">
@@ -857,6 +1034,49 @@ onMounted(() => {
             </div>
             <p class="message-content">{{ message.content }}</p>
 
+            <!-- Fichiers joints -->
+            <div v-if="message._attachments && Object.keys(message._attachments).length > 0" class="attachments-section">
+              <h6>📎 Fichiers joints</h6>
+              <div class="attachments-grid">
+                <div v-for="(attachmentData, name) in message._attachments" :key="name" class="attachment-item">
+                  <div v-if="attachmentData && attachmentData.content_type && attachmentData.content_type.startsWith('image/')" class="attachment-image">
+                    <img 
+                      v-if="state.attachmentUrls[message._id]?.[name]"
+                      :src="state.attachmentUrls[message._id][name]" 
+                      :alt="name"
+                      class="preview-image"
+                    />
+                    <div v-else class="loading-image">Chargement...</div>
+                  </div>
+                  <div class="attachment-info">
+                    <span class="attachment-name">{{ name }}</span>
+                    <button @click="methods.deleteAttachment(message._id, name)" class="btn danger tiny">
+                      Supprimer
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Upload de fichier -->
+            <div class="attachment-upload">
+              <h6>Ajouter un fichier</h6>
+              <input 
+                type="file" 
+                @change="methods.handleFileSelect($event, message._id)"
+                accept="image/*,.pdf,.doc,.docx"
+                class="file-input"
+              />
+              <button 
+                v-if="state.selectedFile?.messageId === message._id"
+                @click="methods.uploadAttachment(message._id)" 
+                class="btn primary tiny"
+                :disabled="state.uploadingAttachment"
+              >
+                {{ state.uploadingAttachment ? 'Upload en cours...' : 'Uploader le fichier' }}
+              </button>
+            </div>
+
             <!-- COMMENTAIRES -->
             <div class="comments-section">
               <h5>Commentaires</h5>
@@ -876,13 +1096,15 @@ onMounted(() => {
               </div>
 
               <button @click="methods.toggleCommentsVisibility(message._id)" class="btn secondary small" style="margin: 10px 0;">
-                {{ state.expandedMessageId === message._id ? 'Masquer' : 'Voir tous' }}
+                {{ state.expandedMessageId === message._id ? 'Masquer tous les commentaires' : 'Voir tous les commentaires' }}
               </button>
 
-              <!-- TOUS LES COMMENTAIRES -->
               <div v-if="state.expandedMessageId === message._id" class="all-comments">
-                <h6>Tous les commentaires :</h6>
-                <div v-for="comment in state.allCommentsForMessage[message._id]" :key="comment._id" class="comment">
+                <h6>Tous les commentaires</h6>
+                <div v-if="!state.allCommentsForMessage[message._id] || state.allCommentsForMessage[message._id].length === 0" class="no-comment">
+                  Aucun commentaire
+                </div>
+                <div v-else v-for="comment in state.allCommentsForMessage[message._id]" :key="comment._id" class="comment">
                   <div v-if="state.editingCommentId === comment._id">
                     <div class="form-group">
                       <label>Commentaire</label>
@@ -908,7 +1130,7 @@ onMounted(() => {
                 </div>
               </div>
 
-              <!-- FORMULAIRE AJOUT COMMENTAIRE -->
+              <!-- Formulaire d'ajout de commentaire -->
               <div class="comment-form">
                 <h6>💬 Ajouter un commentaire</h6>
                 <form @submit.prevent="methods.createComment(message._id)">
@@ -938,18 +1160,52 @@ onMounted(() => {
         </div>
       </section>
 
-      <!-- TOP 10 -->
+      <!-- TOP MESSAGES -->
       <section class="section">
-        <h2>🏆 Top 10 Messages les plus likés</h2>
+        <div class="section-header">
+          <h2>🏆 Top Messages les plus likés</h2>
+          <p class="section-subtitle">Les messages sont triés par nombre de likes (traitement effectué dans la base de données)</p>
+        </div>
+        
         <div v-if="computedData.topLikedMessages.length === 0" class="no-data">Aucun message</div>
-        <div v-else class="top-messages">
-          <div v-for="message in computedData.topLikedMessages" :key="message._id" class="top-message">
-            <h4>{{ message.title }}</h4>
-            <p>{{ message.content?.substring(0, 100) }}...</p>
-            <div class="top-message-meta">
-              <span>❤️ {{ message.likes || 0 }}</span>
-              <span>{{ state.countries.find(c => c._id === message.countryId)?.name || 'Inconnu' }}</span>
+        <div v-else>
+          <div class="top-messages">
+            <div v-for="(message, index) in computedData.topLikedMessages" :key="message._id" class="top-message">
+              <div class="top-message-rank">{{ index + 1 }}</div>
+              <div class="top-message-content">
+                <h4>{{ message.title }}</h4>
+                <p>{{ message.content?.substring(0, 100) }}...</p>
+                
+                <!-- Affichage des images dans le top -->
+                <div v-if="message._attachments && Object.keys(message._attachments).length > 0" class="top-message-images">
+                  <template v-for="(attachmentData, name) in message._attachments" :key="name">
+                    <img 
+                      v-if="attachmentData && attachmentData.content_type && attachmentData.content_type.startsWith('image/') && state.attachmentUrls[message._id]?.[name]"
+                      :src="state.attachmentUrls[message._id][name]" 
+                      :alt="name"
+                      class="top-preview-image"
+                    />
+                  </template>
+                </div>
+                
+                <div class="top-message-meta">
+                  <span class="likes-badge">❤️ {{ message.likes || 0 }} likes</span>
+                  <span class="country-badge">{{ state.countries.find(c => c._id === message.countryId)?.name || 'Inconnu' }}</span>
+                </div>
+              </div>
             </div>
+          </div>
+          
+          <div v-if="state.hasMoreTopMessages" class="load-more-container">
+            <button @click="methods.loadMoreTopMessages" class="btn primary large">
+              Charger les 10 messages suivants
+            </button>
+            <p class="load-more-hint">
+              Actuellement affichés: {{ computedData.topLikedMessages.length }} messages
+            </p>
+          </div>
+          <div v-else class="no-more-data">
+            ✓ Tous les messages ont été chargés
           </div>
         </div>
       </section>
@@ -964,7 +1220,7 @@ onMounted(() => {
   max-width: 1400px;
   margin: 0 auto;
   padding: 20px;
-  font-family: 'Segoe UI', sans-serif;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   background: #f5f7fa;
 }
 
@@ -999,6 +1255,11 @@ onMounted(() => {
   cursor: pointer;
   font-size: 14px;
   font-weight: 600;
+  transition: background 0.3s;
+}
+
+.btn-toggle:hover {
+  background: #2980b9;
 }
 
 .status {
@@ -1022,10 +1283,21 @@ onMounted(() => {
 }
 
 .section h2 {
-  margin: 0 0 20px 0;
+  margin: 0 0 10px 0;
   color: #2c3e50;
   border-bottom: 2px solid #3498db;
   padding-bottom: 10px;
+}
+
+.section-header {
+  margin-bottom: 20px;
+}
+
+.section-subtitle {
+  margin: 5px 0 0 0;
+  color: #7f8c8d;
+  font-size: 13px;
+  font-style: italic;
 }
 
 .search-bar, .toolbar {
@@ -1066,6 +1338,15 @@ onMounted(() => {
   border-radius: 6px;
   font-size: 13px;
   width: 100%;
+}
+
+.file-input {
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 13px;
+  width: 100%;
+  margin-bottom: 10px;
 }
 
 .form-container {
@@ -1112,13 +1393,23 @@ onMounted(() => {
   cursor: pointer;
   font-size: 14px;
   font-weight: 600;
+  transition: all 0.3s;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .btn.primary { background: #3498db; color: white; }
+.btn.primary:hover { background: #2980b9; }
 .btn.secondary { background: #95a5a6; color: white; }
+.btn.secondary:hover { background: #7f8c8d; }
 .btn.danger { background: #e74c3c; color: white; }
+.btn.danger:hover { background: #c0392b; }
 .btn.small { padding: 6px 12px; font-size: 12px; }
 .btn.tiny { padding: 4px 8px; font-size: 11px; }
+.btn.large { padding: 12px 24px; font-size: 16px; }
 
 .btn-like {
   background: none;
@@ -1171,6 +1462,7 @@ onMounted(() => {
   width: 50px;
   height: auto;
   border: 1px solid #ddd;
+  border-radius: 4px;
 }
 
 .card-body p {
@@ -1221,6 +1513,80 @@ onMounted(() => {
   margin: 10px 0;
   line-height: 1.6;
   color: #555;
+}
+
+.attachments-section {
+  margin: 15px 0;
+  padding: 15px;
+  background: #fff9e6;
+  border-radius: 6px;
+  border: 1px solid #ffd966;
+}
+
+.attachments-section h6 {
+  margin: 0 0 10px 0;
+  color: #856404;
+  font-size: 14px;
+}
+
+.attachments-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.attachment-item {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.attachment-image {
+  width: 100%;
+  max-width: 300px;
+}
+
+.preview-image {
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.loading-image {
+  padding: 20px;
+  text-align: center;
+  color: #7f8c8d;
+  font-style: italic;
+}
+
+.attachment-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px;
+  background: white;
+  border-radius: 4px;
+}
+
+.attachment-name {
+  font-size: 13px;
+  color: #333;
+  font-weight: 500;
+}
+
+.attachment-upload {
+  margin: 15px 0;
+  padding: 15px;
+  background: #e8f5e9;
+  border-radius: 6px;
+  border: 2px dashed #4caf50;
+}
+
+.attachment-upload h6 {
+  margin: 0 0 10px 0;
+  color: #2e7d32;
+  font-size: 14px;
 }
 
 .comments-section {
@@ -1299,15 +1665,43 @@ onMounted(() => {
 
 .top-messages {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 15px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 20px;
+  margin-bottom: 20px;
 }
 
 .top-message {
-  border-left: 3px solid #3498db;
-  padding: 15px;
+  border-left: 4px solid #3498db;
+  padding: 20px;
   background: #f8f9fa;
-  border-radius: 6px;
+  border-radius: 8px;
+  display: flex;
+  gap: 15px;
+  transition: all 0.3s;
+}
+
+.top-message:hover {
+  transform: translateX(5px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.top-message-rank {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  background: linear-gradient(135deg, #3498db, #2980b9);
+  color: white;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-size: 18px;
+  box-shadow: 0 2px 8px rgba(52, 152, 219, 0.3);
+}
+
+.top-message-content {
+  flex: 1;
 }
 
 .top-message h4 {
@@ -1320,13 +1714,71 @@ onMounted(() => {
   margin: 0 0 10px 0;
   font-size: 13px;
   color: #555;
+  line-height: 1.5;
+}
+
+.top-message-images {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+  flex-wrap: wrap;
+}
+
+.top-preview-image {
+  width: 80px;
+  height: 80px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 2px solid #ddd;
 }
 
 .top-message-meta {
   display: flex;
-  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  padding-top: 10px;
+  border-top: 1px solid #ddd;
+}
+
+.likes-badge {
+  background: #ffe6e6;
+  color: #e74c3c;
+  padding: 4px 10px;
+  border-radius: 12px;
   font-size: 12px;
+  font-weight: 600;
+}
+
+.country-badge {
+  background: #e8f5e9;
+  color: #2e7d32;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.load-more-container {
+  text-align: center;
+  padding: 30px;
+  background: #f8f9fa;
+  border-radius: 8px;
+  border: 2px dashed #3498db;
+}
+
+.load-more-hint {
+  margin: 15px 0 0 0;
+  font-size: 13px;
   color: #7f8c8d;
+}
+
+.no-more-data {
+  text-align: center;
+  padding: 20px;
+  color: #27ae60;
+  font-weight: 600;
+  background: #e8f5e9;
+  border-radius: 6px;
 }
 
 .no-data {
@@ -1341,6 +1793,9 @@ onMounted(() => {
     grid-template-columns: 1fr;
   }
   .cards-grid {
+    grid-template-columns: 1fr;
+  }
+  .top-messages {
     grid-template-columns: 1fr;
   }
   .app-header {
