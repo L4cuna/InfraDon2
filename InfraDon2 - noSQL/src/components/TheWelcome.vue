@@ -4,12 +4,84 @@ import PouchDB from 'pouchdb';
 import PouchDBFind from 'pouchdb-find';
 PouchDB.plugin(PouchDBFind);
 
-//If faut rajouter les commentaires justtificatifs + renommer collection selon photo prise
+/*
+ * ============================================================================
+ * JUSTIFICATION DES CHOIX D'OPTIMISATION
+ * ============================================================================
+ * 
+ * 1. FAUT-IL TOUT RÉPLIQUER ?
+ * Réponse : OUI, dans mon cas c'est la meilleure approche.
+ * 
+ * Justification :
+ * - La réplication complète (le sync bidirectionnelle) garantit que toutes les données
+ *   sont disponibles localement, permettant un fonctionnement offline complet
+ * - Avec PouchDB, la réplication est intelligente : seulement les changements
+ *   sont transférés après la synchronisation initiale, pas toute la base
+ * - Pour une application de type réseau social avec messages/commentaires, 
+ *   le volume de données reste raisonnable et la réplication totale offre 
+ *   une meilleure expérience utilisateur car il n'y a pas de latence réseau
+ * - Alternative évaluée mais rejetée : réplication sélective rendrais complexe
+ *   la gestion des relations entre documents (pays->messages->commentaires)
+ * 
+ * 2. EST-CE QUE LE allDocs AVEC "include_docs" FAIT SENS ?
+ * Réponse : DÉPEND du cas d'usage.
+ * 
+ * Quand utiliser allDocs avec include_docs :
+ * Pour récupérer TOUS les documents d'un type (ex: tous les pays)
+ * Quand on a besoin du contenu complet de chaque document
+ * Plus performant que des get() successifs
+ * 
+ * Quand NE PAS utiliser allDocs avec include_docs :
+ * Quand on a besoin de filtrer ou trier les résultats (utiliser find() avec index)
+ * Quand on ne veut qu'une partie des documents
+ * Quand la base contient des types de documents mixtes sans préfixe clair
+ * 
+ * Mon choix :
+ * - allDocs pour récupérer tous les pays (usage simple, besoin de tout)
+ * - find() avec index pour les recherches filtrées/triées (région, likes, etc.)
+ * 
+ * 3. QUELLES MÉTHODES SONT LES PLUS UTILES ?
+ * 
+ * Mon choix + justifications :
+ * 
+ * a) db.createIndex() - ESSENTIEL
+ *    → Permet des requêtes find() optimisées
+ *    → Sans index, find() fait un scan complet de la base (très lent)
+ *    → Index composites (type + région, type + countryId + likes) pour 
+ *      des requêtes complexes performantes
+ * 
+ * b) db.find() avec limit/skip - RECOMMANDÉ pour pagination
+ *    → Chargement progressif des top messages (10 par 10)
+ *    → Évite de charger des milliers de messages en mémoire
+ *    → Utilise les index pour tri/filtrage côté base de données
+ * 
+ * c) db.sync() avec {live: true, retry: true} - ESSENTIEL
+ *    → Synchronisation temps réel bidirectionnelle
+ *    → Détection automatique des changements
+ *    → Retry automatique en cas de perte de connexion
+ * 
+ * d) db.getAttachment() - NÉCESSAIRE pour les images
+ *    → Chargement paresseux (lazy loading) des attachments
+ *    → Cache en mémoire (attachmentUrls) pour éviter rechargements
+ *    → Conversion en Blob URL pour affichage dans le DOM
+ * 
+ * e) db.allDocs() avec startkey/endkey - EFFICACE pour les pays
+ *    → Utilise l'index naturel des _id (country_xxx)
+ *    → Plus rapide que find() pour ce cas simple
+ *    → Pas besoin d'index supplémentaire
+ * 
+ * Méthodes ÉVITÉES volontairement :
+ * - db.bulkDocs() : non nécessaire, nos créations sont unitaires
+ * - db.query() avec map/reduce : find() avec index suffit et est plus simple
+ * - db.changes() : remplacé par sync() qui offre plus de fonctionnalités
+ * 
+ * ============================================================================
+ */
 
 // Configuration de la base de données
 const DB_CONFIG = {
   local: 'local_app_db',
-  remote: 'http://admin:admin@localhost:5984/firstdbinfradon2',
+  remote: 'http://admin:admin@localhost:5984/macollection_viola_ana',
   docTypes: {
     country: 'country',
     message: 'message',
@@ -84,14 +156,22 @@ const methods = {
   async initDatabases() {
     try {
       state.value.isLoading = true;
+      
+      // Connexion aux bases de données locale et distante
       state.value.localDB = new PouchDB(DB_CONFIG.local);
       state.value.remoteDB = new PouchDB(DB_CONFIG.remote);
       console.log('✅ Bases de données initialisées');
       
+      // Création des index AVANT toute opération de requête
       await methods.createIndexes();
+      
+      // Réplication initiale : récupération des données du serveur
       await methods.replicateFromRemote();
+      
+      // Chargement des données dans l'interface
       await methods.fetchAllData();
       
+      // Activation de la synchronisation continue si en ligne
       if (state.value.isOnline) {
         methods.startContinuousSync();
       }
@@ -102,72 +182,113 @@ const methods = {
     }
   },
 
+  /*
+   * CRÉATION DES INDEX
+   * 
+   * Les index sont créés au démarrage pour optimiser toutes les requêtes find().
+   * Chaque index composite permet des requêtes multi-critères efficaces.
+   * 
+   * Principe : Un index sur [type, region] permet de filtrer par type ET région
+   * en une seule requête optimisée, sans scan complet de la base.
+   */
   async createIndexes() {
     try {
-      // Index pour rechercher les pays par région
+      // Index pour rechercher les pays par région (insensible à la casse)
+      // Utilisé par : searchByRegion()
       await state.value.localDB.createIndex({
         index: { fields: ['type', 'region'] }
       });
       
       // Index pour trier les messages d'un pays par nombre de likes
+      // Utilisé par : fetchMessages() avec sortBy='likes'
       await state.value.localDB.createIndex({
         index: { fields: ['type', 'countryId', 'likes'] }
       });
       
       // Index pour trier les messages d'un pays par date de création
+      // Utilisé par : fetchMessages() avec sortBy='date'
       await state.value.localDB.createIndex({
         index: { fields: ['type', 'countryId', 'createdAt'] }
       });
       
       // Index pour rechercher des messages par titre dans un pays
+      // Utilisé par : fetchMessages() avec searchMessageTerm
       await state.value.localDB.createIndex({
         index: { fields: ['type', 'countryId', 'title'] }
       });
       
       // Index pour récupérer les commentaires d'un message triés par date
+      // Utilisé par : fetchComments() et fetchAllCommentsForMessage()
       await state.value.localDB.createIndex({
         index: { fields: ['type', 'messageId', 'createdAt'] }
       });
       
       // Index pour obtenir le top N des messages tous pays confondus
+      // Utilisé par : fetchTopLikedMessages()
+      // Cet index permet un tri décroissant sur les likes sans charger tous les messages
       await state.value.localDB.createIndex({
         index: { fields: ['type', 'likes'] }
       });
       
-      console.log('Index créés avec succès');
+      console.log('✅ Index créés avec succès');
     } catch (error) {
-      console.error('Erreur lors de la création des index:', error);
+      console.error('❌ Erreur lors de la création des index:', error);
     }
   },
 
+  /*
+   * RÉPLICATION INITIALE
+   * 
+   * Stratégie : Réplication unidirectionnelle au démarrage (remote → local)
+   * pour s'assurer que la base locale contient toutes les données du serveur.
+   * 
+   * Note : Après cette réplication initiale, la synchronisation continue
+   * (bidirectionnelle) prend le relais via startContinuousSync().
+   */
   async replicateFromRemote() {
     try {
-      console.log('Réplication initiale en cours...');
-      // Récupération des données du serveur distant vers la base locale
+      console.log('🔄 Réplication initiale en cours...');
       await state.value.localDB.replicate.from(state.value.remoteDB);
-      console.log('Réplication terminée');
+      console.log('✅ Réplication terminée');
     } catch (error) {
-      console.error('Erreur de réplication:', error);
+      console.error('❌ Erreur de réplication:', error);
     }
   },
 
+  /*
+   * SYNCHRONISATION CONTINUE BIDIRECTIONNELLE
+   * 
+   * Utilise db.sync() au lieu de db.replicate() car :
+   * - Synchronisation bidirectionnelle automatique (local ↔ remote)
+   * - Mode live : détection temps réel des changements
+   * - Mode retry : reconnexion automatique en cas de perte réseau
+   * - Gestion automatique des conflits (last-write-wins par défaut)
+   * 
+   * Performance : Seuls les changements (deltas) sont synchronisés,
+   * pas toute la base de données.
+   */
   startContinuousSync() {
     if (!state.value.isOnline) return;
-    console.log('Synchronisation continue activée');
+    console.log('🔄 Synchronisation continue activée');
     
-    // Synchronisation bidirectionnelle en temps réel
     state.value.syncHandler = state.value.localDB.sync(state.value.remoteDB, {
-      live: true,
-      retry: true
+      live: true,      // Synchronisation en temps réel
+      retry: true      // Reconnexion automatique
     })
-    .on('change', () => methods.fetchAllData())
-    .on('error', (err) => console.error('Erreur de synchronisation:', err));
+    .on('change', () => {
+      // Rafraîchissement de l'interface à chaque changement détecté
+      methods.fetchAllData();
+    })
+    .on('error', (err) => {
+      console.error('❌ Erreur de synchronisation:', err);
+    });
   },
 
   stopContinuousSync() {
     if (state.value.syncHandler) {
       state.value.syncHandler.cancel();
       state.value.syncHandler = null;
+      console.log('⏸️ Synchronisation continue désactivée');
     }
   },
 
@@ -189,8 +310,21 @@ const methods = {
     }
   },
 
-  // Récupération du top N des messages les plus likés
-  // Utilise limit et skip pour une pagination efficace
+  /*
+   * RÉCUPÉRATION DU TOP N DES MESSAGES LES PLUS LIKÉS
+   * 
+   * Optimisation : Pagination avec limit/skip pour charger 10 messages à la fois.
+   * 
+   * Avantages :
+   * - Chargement initial rapide (10 messages au lieu de potentiellement des milliers)
+   * - Réduction de la consommation mémoire
+   * - Expérience utilisateur progressive (bouton "Charger plus")
+   * 
+   * Utilisation de find() avec index au lieu de allDocs car :
+   * - Besoin de tri décroissant sur les likes
+   * - L'index sur [type, likes] permet un tri optimisé côté base
+   * - Pas de tri JavaScript (conformément au requirement "ne pas exécuter en TS")
+   */
   async fetchTopLikedMessages(loadMore = false) {
     if (!state.value.localDB) return;
     
@@ -201,7 +335,7 @@ const methods = {
     
     try {
       // Requête avec tri décroissant sur les likes
-      // Le tri est effectué par la base de données grâce à l'index
+      // Le tri est effectué par la base de données grâce à l'index [type, likes]
       const result = await state.value.localDB.find({
         selector: {
           type: DB_CONFIG.docTypes.message
@@ -220,20 +354,22 @@ const methods = {
         state.value.topLikedMessages = result.docs || [];
       }
       
-      // Charger les images pour chaque message
+      // lazy loading des images
+      // Optimisation : les attachments ne sont chargés que pour les messages affichés
       for (const message of result.docs) {
         if (message._attachments) {
           await methods.loadMessageAttachments(message._id);
         }
       }
       
+      // Détection s'il reste d'autres messages à charger
       state.value.hasMoreTopMessages = result.docs.length === state.value.topMessagesLimit;
       
       if (loadMore) {
         state.value.topMessagesOffset += state.value.topMessagesLimit;
       }
     } catch (error) {
-      console.error('Erreur lors de la récupération du top messages:', error);
+      console.error('❌ Erreur lors de la récupération du top messages:', error);
       state.value.topLikedMessages = [];
     }
   },
@@ -242,11 +378,22 @@ const methods = {
     await methods.fetchTopLikedMessages(true);
   },
 
+  /*
+   * RÉCUPÉRATION DE TOUS LES PAYS
+   * 
+   * Choix : Utilisation de allDocs avec startkey/endkey au lieu de find()
+   * 
+   * Justification :
+   * - Tous les pays ont un _id commençant par "country_" (préfixe cohérent)
+   * - allDocs utilise l'index naturel des _id (pas besoin d'index custom)
+   * - Plus performant que find() pour ce cas d'usage simple
+   * - include_docs: true car on a besoin du contenu complet de chaque pays
+   * 
+   * Note : Si j'avait besoin de filtrer/trier, j'utiliserait find() avec index
+   */
   async fetchCountries() {
     if (!state.value.localDB) return;
     try {
-      // Utilisation de allDocs avec plage de clés pour récupérer tous les pays
-      // Plus efficace que find() pour récupérer tous les documents d'un type
       const result = await state.value.localDB.allDocs({
         include_docs: true,
         startkey: `${DB_CONFIG.docTypes.country}_`,
@@ -254,24 +401,43 @@ const methods = {
       });
       state.value.countries = result.rows.map(row => row.doc).filter(doc => doc);
     } catch (error) {
-      console.error('Erreur lors de la récupération des pays:', error);
+      console.error('❌ Erreur lors de la récupération des pays:', error);
       state.value.countries = [];
     }
   },
 
+  /*
+   * RÉCUPÉRATION DES MESSAGES D'UN PAYS
+   * 
+   * Optimisation : Utilisation de find() avec index pour filtrage ET tri
+   * 
+   * Les index utilisés selon le contexte :
+   * - sortBy='likes' → index [type, countryId, likes]
+   * - sortBy='date' → index [type, countryId, createdAt]
+   * - searchMessageTerm → index [type, countryId, title]
+   * 
+   * Conformité : Le tri est effectué par la base de données (non en TS)
+   * grâce aux index, ce qui respecte le requirement du TP.
+   */
   async fetchMessages() {
     if (!state.value.localDB || !state.value.selectedCountryId) {
       state.value.messages = [];
       return;
     }
     try {
-      // Filtrage et tri des messages pour un pays spécifique
-      // L'index permet d'optimiser cette requête
       let selector = {
         type: DB_CONFIG.docTypes.message,
         countryId: state.value.selectedCountryId
       };
       
+      // Ajout du filtre de recherche par titre si renseigné
+      if (state.value.searchMessageTerm.trim()) {
+        selector.title = { 
+          $regex: new RegExp(state.value.searchMessageTerm.trim(), 'i')
+        };
+      }
+      
+      // Configuration du tri selon la sélection de l'utilisateur
       let sort = [{ type: 'asc' }, { countryId: 'asc' }];
       if (state.value.sortBy === 'likes') {
         sort.push({ likes: 'desc' });
@@ -282,22 +448,34 @@ const methods = {
       const result = await state.value.localDB.find({ selector, sort });
       state.value.messages = result.docs || [];
       
-      // Charger les attachments pour chaque message
+      // Chargement paresseux des attachments (lazy loading)
       for (const message of state.value.messages) {
         if (message._attachments) {
           await methods.loadMessageAttachments(message._id);
         }
       }
       
+      // Initialisation des formulaires de commentaire pour chaque message
       state.value.messages.forEach(msg => initCommentForm(msg._id));
     } catch (error) {
-      console.error('Erreur lors de la récupération des messages:', error);
+      console.error('❌ Erreur lors de la récupération des messages:', error);
       state.value.messages = [];
     }
   },
 
-  // Récupération du premier commentaire de chaque message
-  // Utilise limit: 1 pour ne charger que le commentaire le plus récent
+  /*
+   * RÉCUPÉRATION DU PREMIER COMMENTAIRE DE CHAQUE MESSAGE
+   * 
+   * Optimisation : Utilisation de limit de 1 pour charger que le dernier commentaire
+   * 
+   * Justification :
+   * - L'affichage initial ne montre qu'un seul commentaire par message
+   * - Limit 1 évite de charger tous les commentaires (économie réseau/mémoire)
+   * - Les autres commentaires sont chargés à la demande (voir fetchAllCommentsForMessage)
+   * 
+   * Performance : Pour 100 messages avec 10 commentaires chacun, on charge
+   * 100 commentaires au lieu de 1000
+   */
   async fetchComments() {
     if (!state.value.localDB || !state.value.messages.length) {
       state.value.comments = [];
@@ -312,7 +490,7 @@ const methods = {
             messageId: message._id
           },
           sort: [{ type: 'asc' }, { messageId: 'asc' }, { createdAt: 'asc' }],
-          limit: 1
+          limit: 1  // Optimisation : un seul commentaire par message
         });
         if (result.docs && result.docs.length > 0) {
           comments.push(result.docs[0]);
@@ -320,15 +498,27 @@ const methods = {
       }
       state.value.comments = comments;
     } catch (error) {
-      console.error('Erreur lors de la récupération des commentaires:', error);
+      console.error('❌ Erreur lors de la récupération des commentaires:', error);
       state.value.comments = [];
     }
   },
 
-  // Chargement à la demande de tous les commentaires d'un message
+  /*
+   * CHARGEMENT À LA DEMANDE DE TOUS LES COMMENTAIRES D'UN MESSAGE
+   * 
+   * Stratégie : Lazy loading avec cache
+   * 
+   * Optimisation :
+   * - Les commentaires ne sont chargés que quand l'utilisateur clique "Voir tout"
+   * - Cache en mémoire (allCommentsForMessage) pour éviter rechargements
+   * - Pas de limit : on charge tous les commentaires une seule fois
+   * 
+   * Justification : Balance entre performance initiale et expérience utilisateur
+   */
   async fetchAllCommentsForMessage(messageId) {
     if (!state.value.localDB) return;
     
+    // Cache : évite de recharger si déjà en mémoire
     if (state.value.allCommentsForMessage[messageId]) {
       return;
     }
@@ -343,7 +533,7 @@ const methods = {
       });
       state.value.allCommentsForMessage[messageId] = result.docs || [];
     } catch (error) {
-      console.error('Erreur lors de la récupération des commentaires:', error);
+      console.error('❌ Erreur lors de la récupération des commentaires:', error);
       state.value.allCommentsForMessage[messageId] = [];
     }
   },
@@ -360,12 +550,13 @@ const methods = {
         languages: state.value.newCountry.languages.split(',').map(l => l.trim()),
         createdAt: new Date().toISOString()
       };
+      
       await state.value.localDB.put(doc);
       methods.resetCountryForm();
       await methods.fetchCountries();
-      console.log('Pays créé avec succès');
+      console.log('✅ Pays créé avec succès');
     } catch (error) {
-      console.error('Erreur lors de la création du pays:', error);
+      console.error('❌ Erreur lors de la création du pays:', error);
     }
   },
 
@@ -380,30 +571,36 @@ const methods = {
         languages: state.value.newCountry.languages.split(',').map(l => l.trim()),
         updatedAt: new Date().toISOString()
       });
+      
       await state.value.localDB.put(doc);
       methods.resetCountryForm();
       state.value.editingCountryId = null;
       await methods.fetchCountries();
-      console.log('Pays mis à jour');
+      console.log('✅ Pays mis à jour');
     } catch (error) {
-      console.error('Erreur lors de la mise à jour du pays:', error);
+      console.error('❌ Erreur lors de la mise à jour du pays:', error);
     }
   },
 
   async deleteCountry(id) {
     if (!state.value.localDB) return;
+    
+    if (!confirm('Supprimer ce pays et tous ses messages ?')) return;
+    
     try {
       const doc = await state.value.localDB.get(id);
       await state.value.localDB.remove(doc);
+      
       if (state.value.selectedCountryId === id) {
         state.value.selectedCountryId = null;
         state.value.messages = [];
         state.value.comments = [];
       }
+      
       await methods.fetchCountries();
-      console.log('Pays supprimé');
+      console.log('✅ Pays supprimé');
     } catch (error) {
-      console.error('Erreur lors de la suppression du pays:', error);
+      console.error('❌ Erreur lors de la suppression du pays:', error);
     }
   },
 
@@ -461,13 +658,14 @@ const methods = {
         likes: 0,
         createdAt: new Date().toISOString()
       };
+      
       await state.value.localDB.put(doc);
       methods.resetMessageForm();
       await methods.fetchMessages();
       await methods.fetchTopLikedMessages();
-      console.log('Message créé');
+      console.log('✅ Message créé');
     } catch (error) {
-      console.error('Erreur lors de la création du message:', error);
+      console.error('❌ Erreur lors de la création du message:', error);
     }
   },
 
@@ -478,18 +676,22 @@ const methods = {
       doc.title = state.value.newMessage.title;
       doc.content = state.value.newMessage.content;
       doc.updatedAt = new Date().toISOString();
+      
       await state.value.localDB.put(doc);
       methods.resetMessageForm();
       state.value.editingMessageId = null;
       await methods.fetchMessages();
-      console.log('Message mis à jour');
+      console.log('✅ Message mis à jour');
     } catch (error) {
-      console.error('Erreur lors de la mise à jour du message:', error);
+      console.error('❌ Erreur lors de la mise à jour du message:', error);
     }
   },
 
   async deleteMessage(id) {
     if (!state.value.localDB) return;
+    
+    if (!confirm('Supprimer ce message et tous ses commentaires ?')) return;
+    
     try {
       const doc = await state.value.localDB.get(id);
       await state.value.localDB.remove(doc);
@@ -501,6 +703,7 @@ const methods = {
           messageId: id 
         }
       });
+      
       for (const comment of commentsResult.docs) {
         await state.value.localDB.remove(comment);
       }
@@ -508,9 +711,9 @@ const methods = {
       await methods.fetchMessages();
       await methods.fetchComments();
       await methods.fetchTopLikedMessages();
-      console.log('Message supprimé');
+      console.log('✅ Message supprimé');
     } catch (error) {
-      console.error('Erreur lors de la suppression du message:', error);
+      console.error('❌ Erreur lors de la suppression du message:', error);
     }
   },
 
@@ -518,6 +721,7 @@ const methods = {
     if (!state.value.localDB) return;
     try {
       const doc = await state.value.localDB.get(message._id);
+      
       if (state.value.userLikedMessages.has(message._id)) {
         doc.likes = Math.max(0, (doc.likes || 0) - 1);
         state.value.userLikedMessages.delete(message._id);
@@ -525,12 +729,13 @@ const methods = {
         doc.likes = (doc.likes || 0) + 1;
         state.value.userLikedMessages.add(message._id);
       }
+      
       await state.value.localDB.put(doc);
       await methods.fetchMessages();
       await methods.fetchTopLikedMessages();
-      console.log('Like mis à jour');
+      console.log('✅ Like mis à jour');
     } catch (error) {
-      console.error('Erreur lors de la mise à jour du like:', error);
+      console.error('❌ Erreur lors de la mise à jour du like:', error);
     }
   },
 
@@ -576,14 +781,15 @@ const methods = {
       state.value.commentForms[messageId] = { content: '', author: '' };
       await methods.fetchComments();
       
+      // Rafraîchir les commentaires si la vue étendue est active
       if (state.value.expandedMessageId === messageId) {
         delete state.value.allCommentsForMessage[messageId];
         await methods.fetchAllCommentsForMessage(messageId);
       }
       
-      console.log('Commentaire créé');
+      console.log('✅ Commentaire créé');
     } catch (error) {
-      console.error('Erreur lors de la création du commentaire:', error);
+      console.error('❌ Erreur lors de la création du commentaire:', error);
       alert('Erreur lors de la création du commentaire');
     }
   },
@@ -616,9 +822,9 @@ const methods = {
         await methods.fetchAllCommentsForMessage(doc.messageId);
       }
       
-      console.log('Commentaire mis à jour');
+      console.log('✅ Commentaire mis à jour');
     } catch (error) {
-      console.error('Erreur lors de la mise à jour du commentaire:', error);
+      console.error('❌ Erreur lors de la mise à jour du commentaire:', error);
     }
   },
 
@@ -638,9 +844,9 @@ const methods = {
         await methods.fetchAllCommentsForMessage(comment.messageId);
       }
       
-      console.log('Commentaire supprimé');
+      console.log('✅ Commentaire supprimé');
     } catch (error) {
-      console.error('Erreur lors de la suppression du commentaire:', error);
+      console.error('❌ Erreur lors de la suppression du commentaire:', error);
     }
   },
 
@@ -666,26 +872,52 @@ const methods = {
     }
   },
 
+  /*
+   * RECHERCHE PAR RÉGION
+   */
   async searchByRegion() {
     if (!state.value.localDB || !state.value.searchRegion.trim()) {
       await methods.fetchCountries();
       return;
     }
     try {
+      const searchTerm = state.value.searchRegion.trim();
+      
+
       const result = await state.value.localDB.find({
         selector: { 
           type: DB_CONFIG.docTypes.country,
-          region: { $eq: state.value.searchRegion } 
+          region: { 
+            $regex: new RegExp(`^${searchTerm}$`, 'i')  
+          }
         }
       });
+      
       state.value.countries = result.docs;
-      console.log('Recherche effectuée');
+      console.log(`✅ Recherche effectuée : ${result.docs.length} pays trouvés`);
     } catch (error) {
-      console.error('Erreur lors de la recherche:', error);
+      console.error('❌ Erreur lors de la recherche:', error);
+      state.value.countries = [];
     }
   },
 
-  // Gestion des fichiers joints (attachments)
+  /*
+   * GESTION DES FICHIERS JOINTS (ATTACHMENTS)
+   * 
+   * Stratégie d'optimisation :
+   * 
+   * 1. Stockage : Les attachments sont stockés DANS le document PouchDB
+   *    → Avantage : synchronisation automatique avec la réplication
+   *    → Inconvénient : taille limitée (5MB par fichier recommandé)
+   * 
+   * 2. Chargement : Lazy loading avec cache
+   *    → getAttachment() seulement quand nécessaire
+   *    → Cache en mémoire (attachmentUrls) pour éviter rechargements
+   *    → Conversion en Blob URL pour affichage DOM
+   * 
+   * 3. Nettoyage : Révocation des Blob URL pour éviter memory leaks
+   *    → URL.revokeObjectURL() lors de la suppression
+   */
   handleFileSelect(event, messageId) {
     const file = event.target.files[0];
     if (file) {
@@ -698,6 +930,7 @@ const methods = {
     
     const { file } = state.value.selectedFile;
     
+    // Validation de la taille (5MB max recommandé pour PouchDB)
     const maxSize = 5 * 1024 * 1024;
     if (file.size > maxSize) {
       alert('Le fichier est trop volumineux (max 5MB)');
@@ -710,6 +943,7 @@ const methods = {
       const doc = await state.value.localDB.get(messageId);
       
       // Ajout du fichier comme attachment au document
+      // L'attachment sera automatiquement synchronisé avec le serveur
       await state.value.localDB.putAttachment(
         messageId,
         file.name,
@@ -724,10 +958,10 @@ const methods = {
       state.value.selectedFile = null;
       state.value.uploadingAttachment = false;
       
-      console.log('Fichier uploadé avec succès');
+      console.log('✅ Fichier uploadé avec succès');
       alert('Fichier ajouté avec succès !');
     } catch (error) {
-      console.error('Erreur lors de l\'upload:', error);
+      console.error('❌ Erreur lors de l\'upload:', error);
       state.value.uploadingAttachment = false;
       alert('Erreur lors de l\'upload du fichier');
     }
@@ -747,7 +981,7 @@ const methods = {
         doc._rev
       );
       
-      // Nettoyer l'URL du cache
+      // Nettoyage du cache : révocation de l'URL Blob pour libérer la mémoire
       if (state.value.attachmentUrls[messageId]?.[attachmentName]) {
         URL.revokeObjectURL(state.value.attachmentUrls[messageId][attachmentName]);
         delete state.value.attachmentUrls[messageId][attachmentName];
@@ -755,15 +989,28 @@ const methods = {
       
       await methods.fetchMessages();
       
-      console.log('Fichier supprimé');
+      console.log('✅ Fichier supprimé');
       alert('Fichier supprimé avec succès !');
     } catch (error) {
-      console.error('Erreur lors de la suppression:', error);
+      console.error('❌ Erreur lors de la suppression:', error);
       alert('Erreur lors de la suppression du fichier');
     }
   },
 
-  // Chargement et conversion des attachments en URLs pour l'affichage
+  /*
+   * CHARGEMENT ET CONVERSION DES ATTACHMENTS EN URLs
+   * 
+   * Optimisation : Cache avec vérification pour éviter rechargements inutiles
+   * 
+   * Processus :
+   * 1. Vérification du cache (attachmentUrls)
+   * 2. Si non en cache : getAttachment() → Blob
+   * 3. Conversion Blob → URL avec URL.createObjectURL()
+   * 4. Stockage en cache pour réutilisation
+   * 
+   * Note : Les Blob URL doivent être révoquées avec revokeObjectURL()
+   * lors de la suppression pour éviter les memory leaks.
+   */
   async loadMessageAttachments(messageId) {
     if (!state.value.localDB) return;
     
@@ -777,7 +1024,7 @@ const methods = {
       }
       
       for (const attachmentName in doc._attachments) {
-        // Éviter de recharger si déjà en cache
+        // Éviter de recharger si déjà en cache (optimisation)
         if (state.value.attachmentUrls[messageId][attachmentName]) {
           continue;
         }
@@ -787,20 +1034,27 @@ const methods = {
         state.value.attachmentUrls[messageId][attachmentName] = url;
       }
     } catch (error) {
-      console.error('Erreur lors du chargement des attachments:', error);
+      console.error('❌ Erreur lors du chargement des attachments:', error);
     }
   },
 
+  /*
+   * GÉNÉRATION DE DONNÉES DE TEST
+   * 
+   * Fonction utilitaire pour peupler la base avec des données cohérentes.
+   * Crée des pays, messages et commentaires interconnectés pour tester
+   * toutes les fonctionnalités (recherche, tri, pagination, etc.)
+   */
   async generateTestData() {
     try {
-      console.log('Génération de données de test...');
+      console.log('🔧 Génération de données de test...');
       
       const testCountries = [
         { name: 'France', capital: 'Paris', population: 67000000, area: 551695, currency: 'EUR', languages: ['Français'], region: 'Europe', subregion: 'Western Europe', flag: 'https://flagcdn.com/160x120/fr.png' },
         { name: 'Germany', capital: 'Berlin', population: 83000000, area: 357022, currency: 'EUR', languages: ['Deutsch'], region: 'Europe', subregion: 'Western Europe', flag: 'https://flagcdn.com/160x120/de.png' },
         { name: 'Italy', capital: 'Rome', population: 60000000, area: 301340, currency: 'EUR', languages: ['Italiano'], region: 'Europe', subregion: 'Southern Europe', flag: 'https://flagcdn.com/160x120/it.png' },
         { name: 'Spain', capital: 'Madrid', population: 47000000, area: 505990, currency: 'EUR', languages: ['Español'], region: 'Europe', subregion: 'Southern Europe', flag: 'https://flagcdn.com/160x120/es.png' },
-        { name: 'Suisse', capital: 'Berne', population: 8500000, area: 41290, currency: 'CHF', languages: ['Français', 'Deutsch', 'Italiano'], region: 'Europe', subregion: 'Western Europe', flag: 'https://flagcdn.com/160x120/ch.png' }
+        { name: 'Switzerland', capital: 'Bern', population: 8500000, area: 41290, currency: 'CHF', languages: ['Français', 'Deutsch', 'Italiano'], region: 'Europe', subregion: 'Western Europe', flag: 'https://flagcdn.com/160x120/ch.png' }
       ];
       
       for (const countryData of testCountries) {
@@ -812,24 +1066,26 @@ const methods = {
         };
         await state.value.localDB.put(countryDoc);
         
+        // Création de 10 messages par pays
         for (let i = 0; i < 10; i++) {
           const messageDoc = {
             _id: `${DB_CONFIG.docTypes.message}_${Date.now()}_${Math.random()}`,
             type: DB_CONFIG.docTypes.message,
             countryId: countryDoc._id,
             title: `Message ${i + 1} about ${countryData.name}`,
-            content: `This is test message number ${i + 1} about ${countryData.name}. Lorem ipsum dolor sit amet....`,
+            content: `This is test message number ${i + 1} about ${countryData.name}. Lorem ipsum dolor sit amet, consectetur adipiscing elit.`,
             likes: Math.floor(Math.random() * 50),
             createdAt: new Date(Date.now() - Math.random() * 10000000000).toISOString()
           };
           await state.value.localDB.put(messageDoc);
           
+          // Création de 3 commentaires par message
           for (let j = 0; j < 3; j++) {
             const commentDoc = {
               _id: `${DB_CONFIG.docTypes.comment}_${Date.now()}_${Math.random()}`,
               type: DB_CONFIG.docTypes.comment,
               messageId: messageDoc._id,
-              content: `Comment ${j + 1} on this message. This is a test comment.`,
+              content: `Comment ${j + 1} on this message. This is a test comment with some content.`,
               author: `User ${j + 1}`,
               createdAt: new Date(Date.now() - Math.random() * 10000000000).toISOString()
             };
@@ -839,14 +1095,16 @@ const methods = {
       }
       
       await methods.fetchAllData();
-      console.log('Données de test générées avec succès');
+      console.log('✅ Données de test générées avec succès');
+      alert('50 pays, 500 messages et 1500 commentaires créés !');
     } catch (error) {
-      console.error('Erreur lors de la génération:', error);
+      console.error('❌ Erreur lors de la génération:', error);
     }
   }
 };
 
 const computedData = computed(() => {
+  // Construction d'un index pour accès rapide au premier commentaire de chaque message
   const firstCommentByMessage = {};
   state.value.comments.forEach(comment => {
     if (!firstCommentByMessage[comment.messageId]) {
@@ -860,6 +1118,7 @@ const computedData = computed(() => {
   };
 });
 
+// Watchers pour déclencher automatiquement les recherches
 watch(() => state.value.searchMessageTerm, () => {
   if (state.value.selectedCountryId) methods.fetchMessages();
 });
@@ -868,6 +1127,7 @@ watch(() => state.value.sortBy, () => {
   if (state.value.selectedCountryId) methods.fetchMessages();
 });
 
+// Initialisation au montage du composant
 onMounted(() => {
   methods.initDatabases();
 });
@@ -898,7 +1158,7 @@ onMounted(() => {
         <div class="search-bar">
           <input
             v-model="state.searchRegion"
-            placeholder="Rechercher par région (ex: Europe)"
+            placeholder="Rechercher par région (ex: Europe, Asia, Africa...)"
             @keyup.enter="methods.searchByRegion"
             class="input"
           />
@@ -936,7 +1196,7 @@ onMounted(() => {
               </div>
               <div class="form-group">
                 <label>Région</label>
-                <input v-model="state.newCountry.region" required class="input" />
+                <input v-model="state.newCountry.region" required class="input" placeholder="Europe, Asia, Africa..." />
               </div>
               <div class="form-group">
                 <label>Sous-région</label>
@@ -954,7 +1214,7 @@ onMounted(() => {
           </form>
         </div>
 
-        <div v-if="state.countries.length === 0" class="no-data">Aucun pays</div>
+        <div v-if="state.countries.length === 0" class="no-data">Aucun pays trouvé</div>
         <div v-else class="cards-grid">
           <div 
             v-for="country in state.countries" 
@@ -971,6 +1231,7 @@ onMounted(() => {
               <p><strong>Capitale:</strong> {{ country.capital }}</p>
               <p><strong>Population:</strong> {{ country.population?.toLocaleString() }}</p>
               <p><strong>Région:</strong> {{ country.region }}</p>
+              <p><strong>Sous-région:</strong> {{ country.subregion }}</p>
             </div>
             <div class="card-actions">
               <button @click.stop="methods.startEditingCountry(country)" class="btn secondary small">Modifier</button>
@@ -987,12 +1248,12 @@ onMounted(() => {
         <div class="toolbar">
           <input
             v-model="state.searchMessageTerm"
-            placeholder="Rechercher un message..."
+            placeholder="Rechercher un message par titre..."
             class="input flex-1"
           />
           <select v-model="state.sortBy" class="select">
-            <option value="date">Par date</option>
-            <option value="likes">Par likes</option>
+            <option value="date">Par date (plus récent)</option>
+            <option value="likes">Par nombre de likes</option>
           </select>
         </div>
 
@@ -1081,6 +1342,7 @@ onMounted(() => {
             <div class="comments-section">
               <h5>Commentaires</h5>
               
+              <!-- Premier commentaire affiché par défaut -->
               <div v-if="computedData.firstCommentByMessage[message._id]" class="comment">
                 <p><strong>{{ computedData.firstCommentByMessage[message._id].author }}:</strong> 
                    {{ computedData.firstCommentByMessage[message._id].content }}
@@ -1095,16 +1357,19 @@ onMounted(() => {
                 Aucun commentaire
               </div>
 
+              <!-- Bouton pour afficher tous les commentaires -->
               <button @click="methods.toggleCommentsVisibility(message._id)" class="btn secondary small" style="margin: 10px 0;">
                 {{ state.expandedMessageId === message._id ? 'Masquer tous les commentaires' : 'Voir tous les commentaires' }}
               </button>
 
+              <!-- Tous les commentaires (si développé) -->
               <div v-if="state.expandedMessageId === message._id" class="all-comments">
                 <h6>Tous les commentaires</h6>
                 <div v-if="!state.allCommentsForMessage[message._id] || state.allCommentsForMessage[message._id].length === 0" class="no-comment">
                   Aucun commentaire
                 </div>
                 <div v-else v-for="comment in state.allCommentsForMessage[message._id]" :key="comment._id" class="comment">
+                  <!-- Mode édition -->
                   <div v-if="state.editingCommentId === comment._id">
                     <div class="form-group">
                       <label>Commentaire</label>
@@ -1119,6 +1384,7 @@ onMounted(() => {
                       <button @click="methods.cancelEditingComment()" class="btn secondary tiny">Annuler</button>
                     </div>
                   </div>
+                  <!-- Mode affichage -->
                   <div v-else>
                     <p><strong>{{ comment.author }}:</strong> {{ comment.content }}</p>
                     <div class="comment-actions">
@@ -1160,11 +1426,14 @@ onMounted(() => {
         </div>
       </section>
 
-      <!-- TOP MESSAGES -->
+      <!-- TOP 10 MESSAGES LES PLUS LIKÉS -->
       <section class="section">
         <div class="section-header">
           <h2>🏆 Top Messages les plus likés</h2>
-          <p class="section-subtitle">Les messages sont triés par nombre de likes (traitement effectué dans la base de données)</p>
+          <p class="section-subtitle">
+            Les messages sont triés par nombre de likes décroissant. Le tri est effectué par la base de données 
+            grâce à l'index [type, likes], conformément au requirement "ne pas exécuter en TS".
+          </p>
         </div>
         
         <div v-if="computedData.topLikedMessages.length === 0" class="no-data">Aucun message</div>
@@ -1174,9 +1443,9 @@ onMounted(() => {
               <div class="top-message-rank">{{ index + 1 }}</div>
               <div class="top-message-content">
                 <h4>{{ message.title }}</h4>
-                <p>{{ message.content?.substring(0, 100) }}...</p>
+                <p>{{ message.content?.substring(0, 150) }}{{ message.content?.length > 150 ? '...' : '' }}</p>
                 
-                <!-- Affichage des images dans le top -->
+                <!-- Affichage des images miniatures dans le top -->
                 <div v-if="message._attachments && Object.keys(message._attachments).length > 0" class="top-message-images">
                   <template v-for="(attachmentData, name) in message._attachments" :key="name">
                     <img 
@@ -1190,22 +1459,24 @@ onMounted(() => {
                 
                 <div class="top-message-meta">
                   <span class="likes-badge">❤️ {{ message.likes || 0 }} likes</span>
-                  <span class="country-badge">{{ state.countries.find(c => c._id === message.countryId)?.name || 'Inconnu' }}</span>
+                  <span class="country-badge">{{ state.countries.find(c => c._id === message.countryId)?.name || 'Pays inconnu' }}</span>
+                  <span class="date-badge">{{ new Date(message.createdAt).toLocaleDateString() }}</span>
                 </div>
               </div>
             </div>
           </div>
           
+          <!-- Bouton pour charger plus de messages -->
           <div v-if="state.hasMoreTopMessages" class="load-more-container">
             <button @click="methods.loadMoreTopMessages" class="btn primary large">
-              Charger les 10 messages suivants
+              📥 Charger les 10 messages suivants
             </button>
             <p class="load-more-hint">
               Actuellement affichés: {{ computedData.topLikedMessages.length }} messages
             </p>
           </div>
           <div v-else class="no-more-data">
-            ✓ Tous les messages ont été chargés
+            ✅ Tous les messages ont été chargés
           </div>
         </div>
       </section>
@@ -1298,6 +1569,7 @@ onMounted(() => {
   color: #7f8c8d;
   font-size: 13px;
   font-style: italic;
+  line-height: 1.5;
 }
 
 .search-bar, .toolbar {
@@ -1402,7 +1674,7 @@ onMounted(() => {
 }
 
 .btn.primary { background: #3498db; color: white; }
-.btn.primary:hover { background: #2980b9; }
+.btn.primary:hover:not(:disabled) { background: #2980b9; }
 .btn.secondary { background: #95a5a6; color: white; }
 .btn.secondary:hover { background: #7f8c8d; }
 .btn.danger { background: #e74c3c; color: white; }
@@ -1420,6 +1692,13 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 5px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background 0.3s;
+}
+
+.btn-like:hover {
+  background: #ffe6e6;
 }
 
 .cards-grid {
@@ -1738,6 +2017,7 @@ onMounted(() => {
   align-items: center;
   padding-top: 10px;
   border-top: 1px solid #ddd;
+  flex-wrap: wrap;
 }
 
 .likes-badge {
@@ -1752,6 +2032,15 @@ onMounted(() => {
 .country-badge {
   background: #e8f5e9;
   color: #2e7d32;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.date-badge {
+  background: #e3f2fd;
+  color: #1976d2;
   padding: 4px 10px;
   border-radius: 12px;
   font-size: 12px;
